@@ -1,5 +1,7 @@
 # AutoRecon + SysReptor plugins (OSCP-style enumeration → report)
 
+Please note that changes and additions were made/checked with AI 
+
 Eight [AutoRecon](https://github.com/Tib3rius/AutoRecon) plugins that add enumeration and report-ready output,
 and a [SysReptor](https://github.com/Syslifters/sysreptor) plugin that imports that output (or raw Nmap XML)
 into a report by drag and drop. Built for the **OffSec OSCP+ Exam Report v2.1** SysReptor design; works on the
