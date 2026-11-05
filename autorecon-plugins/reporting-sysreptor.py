@@ -1,0 +1,268 @@
+from autorecon.plugins import Report
+from autorecon.config import config
+import datetime, glob, json, os, re
+import xml.etree.ElementTree as ET
+
+# Local addition 2026-11-05. Report-ready enumeration text for the SysReptor
+# "OffSec OSCP+ Exam Report v2.1" design, built only from files AutoRecon already saved:
+#   <target>/_sysreptor.md / .json      -> finding fields: Target Name, IP Address, Service Enumeration
+#   <output>/_sysreptor_overview.md / .json -> Methodologies: Information Gathering, Service Enumeration
+# Paste the .md, or send the .json with:  sysreptor-push push --project "NAME" <output dir>
+# Contains only what the scans observed; the access/escalation narrative stays yours.
+
+def _read(p, cap=300000):
+	try:
+		with open(p, errors='replace') as fh:
+			return fh.read(cap)
+	except OSError:
+		return ''
+
+def _find(sd, pattern):
+	return sorted(glob.glob(os.path.join(sd, '**', pattern), recursive=True))
+
+# --- facts shared by the triage and SysReptor reports (same code in both plugins) ---
+def smb_facts(sd):
+	"""Host facts from stock outputs: enum4linux-ng (YAML-style lines) first, Nmap smb NSE second."""
+	e4 = re.sub(r'\x1b\[[0-9;]*m', '', ''.join(_read(f) for f in _find(sd, 'enum4linux-ng.txt')))
+	nm = ''.join(_read(f) for f in _find(sd, '*smb_nmap.txt'))
+	def g(pat, txt):
+		m = re.search(pat, txt, re.M | re.I)
+		v = m.group(1).strip().strip("'\"") if m else ''
+		return '' if v.lower() in ('', 'null', 'none') else v
+	f = {
+		'host': g(r'^\s*NetBIOS computer name:\s*(.+)$', e4) or g(r'^\|\s+NetBIOS computer name:\s*([^\\\s]+)', nm) or g(r'^\|\s+Computer name:\s*(\S+)', nm),
+		'domain': g(r'^\s*DNS domain:\s*(.+)$', e4) or g(r'^\|\s+Domain name:\s*(\S+)', nm) or g(r'^\s*NetBIOS domain name:\s*(.+)$', e4),
+		'fqdn': g(r'^\s*FQDN:\s*(.+)$', e4) or g(r'^\|\s+FQDN:\s*(\S+)', nm),
+		'signing': '', 'smb1': '',
+	}
+	s = g(r'^\s*SMB signing required:\s*(\S+)', e4)
+	if s:
+		f['signing'] = 'required' if s.lower() == 'true' else 'not required'
+	elif re.search(r'signing enabled and required', nm, re.I):
+		f['signing'] = 'required'
+	elif re.search(r'signing enabled but not required|message_signing: disabled', nm, re.I):
+		f['signing'] = 'not required'
+	v1 = g(r'^\s*SMB 1\.0:\s*(\S+)', e4)
+	if v1:
+		f['smb1'] = 'enabled' if v1.lower() == 'true' else 'disabled'
+	elif re.search(r'^\|\s+NT LM 0\.12|smb-security-mode:', nm, re.M):
+		f['smb1'] = 'enabled'
+	return f
+
+def null_shares(sd):
+	"""Shares enum4linux-ng could map with a null session."""
+	t = re.sub(r'\x1b\[[0-9;]*m', '', ''.join(_read(f) for f in _find(sd, 'enum4linux-ng.txt')))
+	return [(s, 'READ' if l == 'OK' else 'map only') for s, l in re.findall(r'Testing share (\S+)\s*\n(?:(?!.*Testing share).*\n){0,4}?\s*\[\+\]\s*Mapping: OK, Listing: (\S+)', t) if s.upper() not in ('IPC$', 'PRINT$')]
+
+def guest_shares(sd):
+	out = []
+	for f in _find(sd, '*nxc_smb_guest_shares.txt'):
+		out += [(s, a.split()[0]) for s, a in re.findall(r'^\S+\s+\S+\s+\d+\s+\S+\s+(\S+)\s+((?:READ|WRITE)[^\n]*)$', _read(f), re.M) if s.upper() not in ('IPC$', 'PRINT$')]
+	return out
+
+def lines_of(sd, name):
+	return [l.strip() for f in _find(sd, name) for l in _read(f).splitlines() if l.strip()]
+
+def ldap_facts(sd):
+	t = ''.join(_read(f) for f in _find(sd, '*ldap_naming_context.txt'))
+	d = re.search(r'^defaultNamingContext:\s*(\S+)', t, re.M | re.I) or re.search(r'^namingContexts:\s*(\S+)', t, re.M | re.I)
+	h = re.search(r'^dnsHostName:\s*(\S+)', t, re.M | re.I)
+	users = ''.join(_read(f) for f in _find(sd, '*ldap_anonymous_users.txt'))
+	notes = [(a, v.strip()) for a, v in re.findall(r'^(description|info|comment|userPassword|unixUserPassword)::?\s*(.+)$', users, re.M | re.I)]
+	return {
+		'dn': d.group(1) if d else '', 'dc': h.group(1) if h else '',
+		'objects': len(re.findall(r'^dn: ', users, re.M)),
+		'accounts': lines_of(sd, 'ldap_anonymous_usernames.txt'),
+		'fields': notes,
+		'computers': re.findall(r'^dNSHostName:\s*(\S+)', ''.join(_read(f) for f in _find(sd, '*ldap_anonymous_computers.txt')), re.M),
+	}
+
+def asrep_users(sd):
+	return [re.sub(r'^\$krb5asrep\$\d+\$', '', h).split('@')[0].split(':')[0] for h in lines_of(sd, 'kerberos_asrep_hashes.txt')]
+# --- end shared facts ---
+
+def services(sd):
+	rows = {}
+	xmls = _find(sd, os.path.join('xml', '*.xml')) + _find(sd, 'udp-top100.xml')
+	for x in xmls:
+		try:
+			root = ET.parse(x).getroot()
+		except Exception:
+			continue
+		for port in root.iter('port'):
+			st = port.find('state')
+			if st is None or st.get('state') != 'open':
+				continue
+			svc = port.find('service')
+			key = (port.get('protocol'), int(port.get('portid')))
+			info = {k: (svc.get(k, '') if svc is not None else '') for k in ('name', 'product', 'version', 'extrainfo', 'tunnel', 'hostname')}
+			old = rows.get(key)
+			if not old or len(''.join(info.values())) > len(''.join(old.values())):
+				rows[key] = info
+	return rows
+
+def notes(sd):
+	out = []
+	cats = {}                       # which result categories appear -> used to pick the commands to show
+	f = smb_facts(sd)
+	host = f['host'] or None
+	if any(f.values()):
+		cats['smb'] = True
+		bits = [f'host `{f["host"]}`' if f['host'] else '', f'domain `{f["domain"]}`' if f['domain'] else '',
+			f'signing {f["signing"]}' if f['signing'] else '', f'SMBv1 {f["smb1"]}' if f['smb1'] else '']
+		out.append('SMB: ' + ', '.join(b for b in bits if b) + '.')
+	for kind, sh in (('null', null_shares(sd)), ('guest', guest_shares(sd))):
+		if sh:
+			cats['smb'] = True
+			out.append(f'SMB {kind} session: ' + ', '.join(f'`{n}` ({a})' for n, a in sh) + '.')
+	rid = lines_of(sd, 'smb_rid_users.txt')
+	if rid:
+		cats['smb'] = True
+		out.append(f'SMB: RID cycling without credentials listed {len(rid)} accounts (' + ', '.join(f'`{u}`' for u in rid[:10]) + (' …' if len(rid) > 10 else '') + ').')
+	for f in _find(sd, '*ftp_anon_tree.txt'):
+		t = _read(f)
+		if 'ACCEPTED' in t:
+			n = len([l for l in t.splitlines() if l.strip() and not l.lstrip().startswith('#')])
+			port = re.search(r'_(\d+)_ftp_anon_tree', f)
+			cats.setdefault('ftp', []).append(port.group(1) if port else '21')
+			out.append(f'FTP{" (" + port.group(1) + ")" if port else ""}: anonymous login accepted; {n} entries listed.')
+	ld = ldap_facts(sd)
+	if ld['dn'] or ld['dc']:
+		cats['ldap'] = True
+		out.append(f'LDAP: naming context `{ld["dn"] or "?"}`' + (f', DC `{ld["dc"]}`' if ld['dc'] else '') + '.')
+		host = host or ld['dc'] or None
+	if ld['objects']:
+		cats['ldap'] = True
+		out.append(f'LDAP: anonymous bind can read the directory ({ld["objects"]} account objects' + (f', {len(ld["computers"])} computers' if ld['computers'] else '') + (f'; {len(ld["fields"])} description/info/password attributes' if ld['fields'] else '') + ').')
+	for f in _find(sd, 'kerberos_valid_users.txt'):
+		users = [u for u in _read(f).splitlines() if u.strip()]
+		if users:
+			cats['kerberos'] = True
+			out.append(f'Kerberos: {len(users)} valid usernames confirmed with kerbrute (' + ', '.join(f'`{u}`' for u in users[:10]) + (' …' if len(users) > 10 else '') + ').')
+	nopre = asrep_users(sd)
+	if nopre:
+		cats['kerberos'] = True
+		out.append('Kerberos: pre-authentication not required for ' + ', '.join(f'`{u}`' for u in nopre) + ' (AS-REP hash obtained without a password).')
+	comms = set()
+	for f in _find(sd, '*onesixtyone*.txt') + _find(sd, '*snmp_community_discovery.txt'):
+		comms |= set(re.findall(r'^\s*\S+\s+\[([^\]]+)\]', _read(f), re.M))
+	if comms:
+		cats['snmp'] = True
+		ext = sum(1 for f in _find(sd, '*extend*.txt') for l in _read(f).splitlines() if 'STRING' in l)
+		out.append('SNMP: communities ' + ', '.join(f'`{c}`' for c in sorted(comms)) + (f'; NET-SNMP-EXTEND output readable ({ext} values).' if ext else '.'))
+	return out, host, cats
+
+# Commands shown in the report: only those that produced what the report states.
+# Port scans come from the Nmap XML "args" (exact command line); enumeration commands come
+# from AutoRecon's scans/_commands.log, filtered to the categories that appear in the results.
+CMD_FILTERS = {
+	'smb': [r'^enum4linux-ng\b', r'(^|/)nmap\b.*smb\*', r'^nxc smb\b.*(--rid-brute|--shares)'],
+	'ldap': [r'(^|\s)ldapsearch\b'],
+	'kerberos': [r'^kerbrute userenum\b', r'GetNPUsers'],
+	'snmp': [r'^onesixtyone\b', r'^snmp(bulk)?walk\b.*\s(\.1|1\.3\.6\.1\.4\.1\.8072\.1\.3\.2)(\s|$)'],
+}
+
+def _tidy(cmd, sd):
+	base = os.path.dirname(sd.rstrip('/'))
+	cmd = cmd.replace(sd.rstrip('/') + '/', 'scans/').replace(base.rstrip('/') + '/', '')
+	cmd = re.sub(r'^\S*/nmap(\s)', r'nmap\1', cmd).replace(' --privileged', '')
+	return re.sub(r'\s+2>&1\s*$', '', cmd).strip()
+
+def commands(address, sd, cats):
+	out, seen = [], set()
+	def add(c):
+		if c and c not in seen:
+			seen.add(c); out.append(c)
+	scans = [x for x in _find(sd, os.path.join('xml', '_*.xml'))] + _find(sd, 'udp-top100.xml')
+	for x in scans:
+		try:
+			args = ET.parse(x).getroot().get('args', '')
+		except Exception:
+			continue
+		c = _tidy(args, sd)
+		if c and re.search(r'(^|\s)-sU(\s|$)', c) and not c.startswith('sudo '):
+			c = 'sudo ' + c                      # UDP scans need root
+		add(c)
+	logged = [c.strip() for c in _read(os.path.join(sd, '_commands.log')).split('\n\n') if c.strip()]
+	for cat, pats in CMD_FILTERS.items():
+		if cat in cats:
+			for c in logged:
+				if any(re.search(p, c) for p in pats):
+					add(_tidy(c, sd))
+	for port in cats.get('ftp', []):
+		add('# anonymous FTP tree: listed in-process by the ftp-anonymous-tree plugin (Python ftplib); reproduce with standard tools:')
+		add(f'wget -r -l 6 --spider -nd --no-verbose ftp://anonymous:anonymous@{address}:{port}/')
+	return out
+
+def target_block(address, sd):
+	svc = services(sd)
+	tcp = ', '.join(str(p) for (pr, p) in sorted(svc) if pr == 'tcp') or '—'
+	udp = ', '.join(str(p) for (pr, p) in sorted(svc) if pr == 'udp') or ('not scanned' if not _find(sd, 'udp-top100.xml') else '—')
+	L = ['**Port Scan Results**', '', '| IP Address | Ports Open |', '| ------- | ------- |', f'| {address} | **TCP:** {tcp} **UDP:** {udp} |', '']
+	if svc:
+		L += ['**Service Details**', '', '| Port | Service | Product / Version |', '| ------- | ------- | ------- |']
+		for (pr, p), s in sorted(svc.items()):
+			name = (s['tunnel'] + '/' if s['tunnel'] else '') + s['name']
+			L.append(f"| {p}/{pr} | {name or '—'} | {' '.join(v for v in (s['product'], s['version'], s['extrainfo']) if v) or '—'} |")
+		L.append('')
+	obs, host, cats = notes(sd)
+	if obs:
+		L += ['**Enumeration Results**', ''] + [f'* {o}' for o in obs] + ['']
+	cmds = commands(address, sd, cats)
+	if cmds:
+		L += ['**Enumeration Commands**', '', '```bash'] + cmds + ['```', '']
+	return '\n'.join(L).rstrip() + '\n', svc, host
+
+class SysreptorReport(Report):
+
+	def __init__(self):
+		super().__init__()
+		self.name = 'SysReptor Overview'
+		self.tags = ['default', 'safe', 'report', 'local-addition']
+
+	async def run(self, targets):
+		stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+		for target in targets:
+			sd = target.scandir
+			base = os.path.dirname(sd.rstrip('/'))
+			md, svc, host = target_block(target.address, sd)
+			ports = {p for (_, p) in svc}
+			data = {
+				'schema': 1, 'generated_utc': stamp, 'ip': target.address,
+				'title': host or target.address,
+				'target_type_guess': 'activedirectoryset' if ({88, 389} <= ports or 3268 in ports) else 'independent',
+				'tcp': sorted(p for (pr, p) in svc if pr == 'tcp'), 'udp': sorted(p for (pr, p) in svc if pr == 'udp'),
+				'udp_scanned': bool(_find(sd, 'udp-top100.xml')) or any(pr == 'udp' for (pr, _) in svc),
+				'serviceenum': md,
+			}
+			with open(os.path.join(base, '_sysreptor.json'), 'w') as fh:
+				json.dump(data, fh, indent=1)
+			with open(os.path.join(base, '_sysreptor.md'), 'w') as fh:
+				fh.write(f'<!-- SysReptor (OffSec OSCP+ v2.1) finding fields for {target.address}. Generated {stamp} from AutoRecon output. -->\n\n'
+					f'Target Name: {data["title"]}\nIP Address: {target.address}\nTarget Type (guess): {data["target_type_guess"]}\n\n'
+					'--- Service Enumeration (paste into the finding field) ---\n\n' + md)
+		self.overview(config['output'], stamp)
+
+	@staticmethod
+	def overview(outdir, stamp):
+		items = []
+		for f in sorted(glob.glob(os.path.join(outdir, '*', '_sysreptor.json'))):
+			try:
+				items.append(json.load(open(f)))
+			except Exception:
+				continue
+		if not items:
+			return
+		ips = [i['ip'] for i in items]
+		info = '**Exam Network:**\n' + '\n'.join(f'* {ip}' for ip in ips) + '\n'
+		udp_all = all(i.get('udp_scanned', True) for i in items)
+		udp_any = any(i.get('udp_scanned', True) for i in items)
+		udp_txt = ' and a separate top-100 UDP scan' if udp_all else (' and, where noted, a separate top-100 UDP scan' if udp_any else '; UDP was not scanned')
+		enum = ('Each target was scanned with AutoRecon (all TCP ports, service and version detection, per-service enumeration)'
+			+ udp_txt + '.\n\n| IP Address | Ports Open |\n| ------- | ------- |\n'
+			+ '\n'.join(f"| {i['ip']} | **TCP:** {', '.join(map(str, i['tcp'])) or '—'} **UDP:** {', '.join(map(str, i['udp'])) or ('—' if i.get('udp_scanned', True) else 'not scanned')} |" for i in items) + '\n')
+		data = {'schema': 1, 'generated_utc': stamp, 'targets': ips, 'infogathering': info, 'serviceenum': enum}
+		with open(os.path.join(outdir, '_sysreptor_overview.json'), 'w') as fh:
+			json.dump(data, fh, indent=1)
+		with open(os.path.join(outdir, '_sysreptor_overview.md'), 'w') as fh:
+			fh.write(f'<!-- SysReptor Methodologies fields, generated {stamp}. -->\n\n--- Information Gathering (target list) ---\n\n{info}\n--- Service Enumeration (overview) ---\n\n{enum}')

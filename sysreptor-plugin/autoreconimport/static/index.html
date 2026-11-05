@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutoRecon / Nmap import</title>
+<style>
+:root{--bg:#fff;--fg:#1d2330;--mut:#5b6475;--line:#d8dce4;--card:#f6f7f9;--acc:#2f6fdf;--ok:#1d8a4a;--warn:#b26a00;--err:#c0392b;--code:#eef1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#1e1e1e;--fg:#e6e8ec;--mut:#a3aab8;--line:#3a3f48;--card:#262a31;--acc:#6ea0ff;--ok:#4cc27e;--warn:#e0a33b;--err:#ff7b6b;--code:#2b3038}}
+*{box-sizing:border-box}body{margin:0;padding:18px 22px 40px;font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 8px}.mut{color:var(--mut)}
+#drop{border:2px dashed var(--line);border-radius:10px;padding:26px;text-align:center;background:var(--card);cursor:pointer;transition:.15s}
+#drop.over{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,var(--card))}
+table{border-collapse:collapse;width:100%;margin:6px 0}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}th{font-weight:600;color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+input[type=text],select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit;width:100%}
+label.opt{display:block;margin:4px 0}button{font:inherit;padding:8px 16px;border-radius:7px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}
+button.sec{background:transparent;color:var(--acc)}pre{background:var(--code);padding:10px;border-radius:7px;overflow:auto;max-height:340px;white-space:pre-wrap;font-size:12.5px}
+details{margin:6px 0}summary{cursor:pointer}.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}#log div{margin:2px 0}
+</style>
+</head>
+<body>
+<h1>AutoRecon / Nmap import</h1>
+<div class="mut" id="proj">Loading project…</div>
+
+<h2>1 · Drop files</h2>
+<div id="drop" tabindex="0" role="button" aria-label="Drop or choose files">
+  <strong>Drop files or whole folders here</strong> (several at once is fine) or click to choose files<br>
+  <span class="mut">AutoRecon: <code>&lt;IP&gt;/_sysreptor.json</code>, <code>_sysreptor_overview.json</code> · Nmap: any <code>-oX</code> XML (e.g. <code>_full_tcp_nmap.xml</code>, <code>udp-top100.xml</code>)<br>
+  Folders are searched recursively; only those files are used. One scan per host, or AD hosts added after a pivot: import whenever ready — Methodologies keeps every target from earlier imports.</span>
+  <input id="file" type="file" multiple accept=".json,.xml" hidden>
+  <input id="dir" type="file" webkitdirectory multiple hidden>
+</div>
+<p><button id="pickdir" class="sec" type="button">Choose folder…</button></p>
+<div id="files" class="mut"></div>
+
+<h2>2 · Targets</h2>
+<div id="targets" class="mut">No targets yet.</div>
+
+<h2>3 · What to import</h2>
+<label class="opt"><input type="checkbox" id="m-notes" checked> <strong>Notes</strong> — new page tree “AutoRecon import &lt;time&gt;” (always additive)</label>
+<label class="opt"><input type="checkbox" id="m-findings"> <strong>Target findings</strong> — create one per IP if missing; otherwise fill <em>Service Enumeration</em> only while it is the template, else add/refresh a marked block after your text</label>
+<label class="opt"><input type="checkbox" id="m-method"> <strong>Methodologies</strong> — Information Gathering target list and Service Enumeration table (template example IPs replaced; edited text kept, block appended)</label>
+
+<h2>4 · Preview</h2>
+<div id="plan" class="mut">Drop files to see the plan.</div>
+<p><button id="go" disabled>Import</button> <button id="reset" class="sec">Clear</button></p>
+<div id="log"></div>
+
+<script>
+'use strict';
+const BEGIN = '<!-- autorecon:begin -->', END = '<!-- autorecon:end -->';
+const pid = (location.hash.match(/projects\/([0-9a-f-]{36})/i) || [])[1];
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let project = null, design = null, findings = [], methodology = null;
+const targets = new Map();   // ip -> {ip,title,type,source,serviceenum,tcp,udp,udpScanned,nmap?}
+let overviewFile = null;
+
+function cookie(n) { return document.cookie.split('; ').find((c) => c.startsWith(n + '='))?.split('=')[1]; }
+async function api(method, path, body) {
+  const h = { Accept: 'application/json' };
+  if (body !== undefined) h['Content-Type'] = 'application/json';
+  const t = cookie('csrftoken'); if (t) h['X-CSRFToken'] = decodeURIComponent(t);
+  const r = await fetch(path, { method, headers: h, credentials: 'same-origin', body: body !== undefined ? JSON.stringify(body) : undefined });
+  if (!r.ok) throw new Error(`${method} ${path} → HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  const tx = await r.text(); return tx ? JSON.parse(tx) : null;
+}
+async function all(path) {
+  let out = [], next = path;
+  while (next) {
+    const r = await api('GET', next);
+    if (Array.isArray(r)) return r;
+    out = out.concat(r.results || []);
+    next = r.next ? (new URL(r.next, location.origin).pathname + new URL(r.next, location.origin).search) : null;
+  }
+  return out;
+}
+
+// ---------- parsing ----------
+const ipKey = (ip) => ip.split(/[.:]/).map((x) => x.padStart(5, '0')).join('.');
+function guessType(ports) { const p = new Set(ports.map((x) => x.port)); return (p.has(88) && p.has(389)) || p.has(3268) ? 'activedirectoryset' : 'independent'; }
+function renderNmap(t) {
+  const tcp = t.ports.filter((p) => p.proto === 'tcp').map((p) => p.port).sort((a, b) => a - b);
+  const udp = t.ports.filter((p) => p.proto === 'udp').map((p) => p.port).sort((a, b) => a - b);
+  const L = ['**Port Scan Results**', '', '| IP Address | Ports Open |', '| ------- | ------- |',
+    `| ${t.ip} | **TCP:** ${tcp.join(', ') || '—'} **UDP:** ${udp.join(', ') || (t.udpScanned ? '—' : 'not scanned')} |`, ''];
+  if (t.ports.length) {
+    L.push('**Service Details**', '', '| Port | Service | Product / Version |', '| ------- | ------- | ------- |');
+    [...t.ports].sort((a, b) => a.proto.localeCompare(b.proto) || a.port - b.port).forEach((p) => {
+      const name = (p.tunnel ? p.tunnel + '/' : '') + p.name;
+      L.push(`| ${p.port}/${p.proto} | ${name || '—'} | ${[p.product, p.version, p.extrainfo].filter(Boolean).join(' ') || '—'} |`);
+    });
+  }
+  return { tcp, udp, md: L.join('\n').trim() + '\n' };
+}
+function addNmap(text, fname) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror') || !doc.querySelector('nmaprun')) return `${fname}: not Nmap XML`;
+  const udpScanned = !!doc.querySelector('scaninfo[protocol="udp"]');
+  let n = 0;
+  doc.querySelectorAll('host').forEach((h) => {
+    const a = [...h.querySelectorAll('address')].find((x) => /ipv[46]/.test(x.getAttribute('addrtype')));
+    if (!a) return;
+    const ip = a.getAttribute('addr'); n++;
+    const hostname = h.querySelector('hostnames > hostname')?.getAttribute('name') || '';
+    let t = targets.get(ip);
+    if (!t) { t = { ip, title: hostname || ip, type: null, source: 'Nmap', ports: [], udpScanned: false }; targets.set(ip, t); }
+    t.udpScanned = t.udpScanned || udpScanned;
+    t.ports = t.ports || [];
+    h.querySelectorAll('ports > port').forEach((p) => {
+      if (p.querySelector('state')?.getAttribute('state') !== 'open') return;
+      const s = p.querySelector('service');
+      const rec = { proto: p.getAttribute('protocol'), port: +p.getAttribute('portid'), name: s?.getAttribute('name') || '', tunnel: s?.getAttribute('tunnel') || '',
+        product: s?.getAttribute('product') || '', version: s?.getAttribute('version') || '', extrainfo: s?.getAttribute('extrainfo') || '' };
+      const i = t.ports.findIndex((x) => x.proto === rec.proto && x.port === rec.port);
+      if (i < 0) t.ports.push(rec); else if ((rec.product + rec.version).length > (t.ports[i].product + t.ports[i].version).length) t.ports[i] = rec;
+      if (!t.title || t.title === ip) { const hn = s?.getAttribute('hostname'); if (hn) t.title = hn; }
+    });
+    if (t.source !== 'AutoRecon') { const r = renderNmap(t); Object.assign(t, { serviceenum: r.md, tcp: r.tcp, udp: r.udp }); }
+  });
+  return `${fname}: Nmap XML, ${n} host(s)`;
+}
+function addJson(text, fname) {
+  let d; try { d = JSON.parse(text); } catch { return `${fname}: invalid JSON`; }
+  if (d.infogathering && d.serviceenum && Array.isArray(d.targets)) { overviewFile = d; return `${fname}: AutoRecon overview (${d.targets.length} target(s))`; }
+  if (d.ip && d.serviceenum) {
+    const old = targets.get(d.ip);
+    targets.set(d.ip, { ip: d.ip, title: d.title || d.ip, type: null, guess: d.target_type_guess, source: 'AutoRecon', serviceenum: d.serviceenum,
+      tcp: d.tcp || [], udp: d.udp || [], udpScanned: d.udp_scanned !== false, ports: old?.ports || [] });
+    return `${fname}: AutoRecon target ${d.ip}` + (old?.source === 'Nmap' ? ' (replaces Nmap-only text for this IP)' : '');
+  }
+  return `${fname}: not an AutoRecon _sysreptor JSON`;
+}
+// Keep only importable files when a folder is given (AutoRecon output contains many other files).
+const IMPORTABLE = /(^|\/)_sysreptor(_overview)?\.json$|\.xml$/i;
+function readEntry(entry, out) {
+  return new Promise((resolve) => {
+    if (entry.isFile) { entry.file((f) => { f.__path = entry.fullPath; out.push(f); resolve(); }, () => resolve()); return; }
+    if (!entry.isDirectory) { resolve(); return; }
+    const reader = entry.createReader(), batch = [];
+    const next = () => reader.readEntries(async (ents) => {
+      if (!ents.length) { for (const e of batch) await readEntry(e, out); resolve(); return; }
+      batch.push(...ents); next();
+    }, () => resolve());
+    next();
+  });
+}
+async function collectDropped(dt) {
+  const entries = [...(dt.items || [])].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return [...dt.files];
+  const out = []; for (const e of entries) await readEntry(e, out); return out;
+}
+async function handleSelection(list, fromFolder) {
+  const keep = fromFolder ? list.filter((f) => IMPORTABLE.test(f.__path || f.webkitRelativePath || f.name)) : list;
+  const skipped = list.length - keep.length;
+  if (skipped) $('#files').insertAdjacentHTML('afterbegin', `<div class="mut">${skipped} other file(s) in the folder(s) ignored.</div>`);
+  if (!keep.length) { $('#files').insertAdjacentHTML('afterbegin', '<div class="warn">No _sysreptor*.json or Nmap XML found.</div>'); return; }
+  await handleFiles(keep);
+}
+async function handleFiles(list) {
+  const msgs = [];
+  for (const f of list) {
+    const text = await f.text();
+    msgs.push(/\.xml$/i.test(f.name) || text.trimStart().startsWith('<') ? addNmap(text, f.name) : addJson(text, f.name));
+  }
+  $('#files').innerHTML = msgs.map((m) => `<div>${esc(m)}</div>`).join('') + $('#files').innerHTML;
+  renderTargets(); await plan();
+}
+
+// ---------- overview + merge ----------
+// Overview = target list + port table. Rows are keyed by IP so that separate imports (one scan per
+// host, AD hosts later through a pivot) accumulate: earlier targets stay, re-scanned hosts are updated.
+const IPROW = /^\|\s*([0-9a-fA-F][0-9a-fA-F.:]*)\s*\|/;
+function blockOf(t) { const s = t || '', i = s.indexOf(BEGIN), j = s.indexOf(END); return i >= 0 && j > i ? s.slice(i + BEGIN.length, j) : ''; }
+function rowsFrom(t) { const m = new Map(); (t || '').split('\n').forEach((l) => { const x = l.match(IPROW); if (x && /\d/.test(x[1])) m.set(x[1], l.trim()); }); return m; }
+function ipsFrom(t) { return (t || '').split('\n').map((l) => l.match(/^\*\s+([0-9a-fA-F][0-9a-fA-F.:]*)\s*$/)).filter(Boolean).map((m) => m[1]); }
+const byIp = (a, b) => (ipKey(a) < ipKey(b) ? -1 : ipKey(a) > ipKey(b) ? 1 : 0);
+function renderOverview(ips, rows) {
+  const list = [...new Set([...ips, ...rows.keys()])].sort(byIp);
+  const R = [...rows.keys()].sort(byIp).map((k) => rows.get(k));
+  const ns = R.filter((r) => /not scanned/.test(r)).length;
+  const udp = !R.length || ns === 0 ? ' and a separate top-100 UDP scan' : ns < R.length ? ' and, where noted, a separate top-100 UDP scan' : '; UDP was not scanned';
+  return {
+    count: list.length,
+    info: '**Exam Network:**\n' + list.map((i) => `* ${i}`).join('\n') + '\n',
+    enum: `Each target was scanned with AutoRecon / Nmap (all TCP ports, service and version detection)${udp}.\n\n| IP Address | Ports Open |\n| ------- | ------- |\n` + R.join('\n') + '\n',
+  };
+}
+function overview() {            // this import only (used for the notes page)
+  const rows = new Map(), ips = [];
+  if (overviewFile) { rowsFrom(overviewFile.serviceenum).forEach((v, k) => rows.set(k, v)); ips.push(...ipsFrom(overviewFile.infogathering)); }
+  for (const t of targets.values()) {
+    ips.push(t.ip);
+    rows.set(t.ip, `| ${t.ip} | **TCP:** ${(t.tcp || []).join(', ') || '—'} **UDP:** ${(t.udp || []).join(', ') || (t.udpScanned ? '—' : 'not scanned')} |`);
+  }
+  if (!ips.length && !rows.size) return null;
+  return { ips, rows, ...renderOverview(ips, rows) };
+}
+function accumulated(ov) {       // this import + everything earlier imports put in the project
+  const prevIps = ipsFrom(blockOf(methodology?.infogathering)), prevRows = rowsFrom(blockOf(methodology?.serviceenum));
+  const before = new Set([...prevIps, ...prevRows.keys()]);
+  const rows = new Map(prevRows); ov.rows.forEach((v, k) => rows.set(k, v));
+  const r = renderOverview([...prevIps, ...ov.ips], rows);
+  const added = [...new Set([...ov.ips, ...ov.rows.keys()])].filter((ip) => !before.has(ip)).length;
+  return { ...r, kept: before.size, added };
+}
+const marked = (t) => `${BEGIN}\n${t.trimEnd()}\n${END}`;
+function merge(existing, add, dflt) {
+  const ex = (existing || '').trim();
+  if (!ex || (dflt != null && ex === dflt.trim())) return [marked(add), 'fill template'];
+  if (existing.includes(BEGIN) && existing.includes(END)) {
+    const re = new RegExp(BEGIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[\\s\\S]*?' + END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return [existing.replace(re, () => marked(add)), 'refresh marked block'];
+  }
+  return [existing.trimEnd() + '\n\n' + marked(add), 'append block after your text'];
+}
+const fdef = (fields, id) => (fields || []).find((f) => f.id === id)?.default || '';
+
+// ---------- UI ----------
+function renderTargets() {
+  if (!targets.size) { $('#targets').textContent = 'No targets yet.'; return; }
+  const rows = [...targets.values()].sort((a, b) => ipKey(a.ip) < ipKey(b.ip) ? -1 : 1).map((t) => {
+    const type = t.type || t.guess || guessType(t.ports || []);
+    t.type = type;
+    return `<tr><td><code>${esc(t.ip)}</code></td>
+      <td><input type="text" data-ip="${esc(t.ip)}" data-k="title" value="${esc(t.title)}"></td>
+      <td><select data-ip="${esc(t.ip)}" data-k="type"><option value="independent"${type === 'independent' ? ' selected' : ''}>independent</option><option value="activedirectoryset"${type === 'activedirectoryset' ? ' selected' : ''}>activedirectoryset</option></select></td>
+      <td><span class="pill">${esc(t.source)}</span></td>
+      <td><details><summary>Service Enumeration</summary><pre>${esc(t.serviceenum)}</pre></details></td></tr>`;
+  }).join('');
+  $('#targets').innerHTML = `<table><thead><tr><th>IP</th><th>Target Name</th><th>Target Type</th><th>Source</th><th>Text</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('#targets').querySelectorAll('[data-ip]').forEach((el) => el.addEventListener('change', () => { targets.get(el.dataset.ip)[el.dataset.k] = el.value; plan(); }));
+}
+async function plan() {
+  const ov = overview(), out = [];
+  if (!targets.size && !ov) { $('#plan').textContent = 'Drop files to see the plan.'; $('#go').disabled = true; return; }
+  if ($('#m-notes').checked) out.push(`<div class="ok">Notes: new page “AutoRecon import …” with ${targets.size} target page(s)${ov ? ' + overview' : ''}</div>`);
+  if ($('#m-findings').checked) {
+    for (const t of targets.values()) {
+      const m = findings.filter((f) => (f.data?.ip_address || '').trim() === t.ip);
+      if (!m.length) out.push(`<div>Finding <code>${esc(t.ip)}</code>: <span class="ok">create</span> “${esc(t.title)}” (${esc(t.type)})</div>`);
+      else out.push(`<div>Finding <code>${esc(t.ip)}</code> “${esc(m[0].data.title)}”: Service Enumeration → <span class="warn">${merge(m[0].data.serviceenum, t.serviceenum, fdef(design?.finding_fields, 'serviceenum'))[1]}</span>${m.length > 1 ? ' (first of ' + m.length + ')' : ''}</div>`);
+    }
+  }
+  if ($('#m-method').checked) {
+    if (!methodology) out.push('<div class="err">Methodologies: this design has no “methodology” section</div>');
+    else if (ov) {
+      const acc = accumulated(ov), sec = design.report_sections.find((s) => s.id === 'methodology');
+      const dInfo = fdef(sec.fields, 'infogathering');
+      out.push(`<div>Methodologies / Information Gathering → <span class="warn">${(methodology.infogathering || '').trim() === dInfo.trim() && dInfo.includes('**Exam Network:**') ? 'replace template example IPs' : merge(methodology.infogathering, acc.info)[1]}</span></div>`);
+      const dEnum = fdef(sec.fields, 'serviceenum');
+      out.push(`<div>Methodologies / Service Enumeration → <span class="warn">${(methodology.serviceenum || '').trim() === dEnum.trim() ? 'append table after template text' : merge(methodology.serviceenum, acc.enum)[1]}</span></div>`);
+      out.push(`<div class="mut">Methodologies will list ${acc.count} target(s): ${acc.kept} from earlier imports kept, ${acc.added} new.</div>`);
+      out.push(`<details><summary>Methodologies text after import</summary><pre>${esc('Information Gathering\n\n' + acc.info + '\nService Enumeration\n\n' + acc.enum)}</pre></details>`);
+    }
+  }
+  $('#plan').innerHTML = out.join('') || '<span class="mut">Nothing selected.</span>';
+  $('#go').disabled = project?.readonly || !(targets.size || ov) || !($('#m-notes').checked || $('#m-findings').checked || $('#m-method').checked);
+}
+function log(msg, cls = '') { const d = document.createElement('div'); d.className = cls; d.textContent = msg; $('#log').appendChild(d); }
+
+async function doImport() {
+  $('#go').disabled = true; $('#log').innerHTML = '';
+  const ov = overview(), stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  try {
+    if ($('#m-notes').checked) {
+      const ipsTxt = [...targets.keys()].sort(byIp), label = ipsTxt.slice(0, 4).join(', ') + (ipsTxt.length > 4 ? ` +${ipsTxt.length - 4}` : '');
+      const parent = await api('POST', `/api/v1/pentestprojects/${pid}/notes/`, { title: `AutoRecon import ${stamp}${label ? ' — ' + label : ''}`, text: 'Imported with the AutoRecon / Nmap import plugin. Enumeration only; verify before reporting.', icon_emoji: '📡' });
+      for (const t of targets.values()) await api('POST', `/api/v1/pentestprojects/${pid}/notes/`, { title: `${t.ip} (${t.title})`, text: t.serviceenum, parent: parent.id });
+      if (ov) await api('POST', `/api/v1/pentestprojects/${pid}/notes/`, { title: 'Overview (Methodologies)', text: '**Information Gathering**\n\n' + ov.info + '\n**Service Enumeration**\n\n' + ov.enum, parent: parent.id });
+      log(`Notes: created “AutoRecon import ${stamp}${label ? ' — ' + label : ''}” (${targets.size} target page(s))`, 'ok');
+    }
+    if ($('#m-findings').checked) {
+      findings = await all(`/api/v1/pentestprojects/${pid}/findings/`);
+      for (const t of targets.values()) {
+        const m = findings.filter((f) => (f.data?.ip_address || '').trim() === t.ip);
+        if (!m.length) {
+          await api('POST', `/api/v1/pentestprojects/${pid}/findings/`, { data: { title: t.title, ip_address: t.ip, target_type: t.type, serviceenum: marked(t.serviceenum) } });
+          log(`Finding ${t.ip}: created “${t.title}”`, 'ok');
+        } else {
+          const [v, how] = merge(m[0].data.serviceenum, t.serviceenum, fdef(design.finding_fields, 'serviceenum'));
+          await api('PATCH', `/api/v1/pentestprojects/${pid}/findings/${m[0].id}/`, { data: { serviceenum: v } });
+          log(`Finding ${t.ip}: Service Enumeration — ${how}`, 'ok');
+        }
+      }
+    }
+    if ($('#m-method').checked && methodology && ov) {
+      const sec = design.report_sections.find((s) => s.id === 'methodology');
+      methodology = (await api('GET', `/api/v1/pentestprojects/${pid}/sections/methodology/`)).data;   // fresh copy, then accumulate
+      const acc = accumulated(ov);
+      const upd = {}, dInfo = fdef(sec.fields, 'infogathering'), dEnum = fdef(sec.fields, 'serviceenum');
+      upd.infogathering = (methodology.infogathering || '').trim() === dInfo.trim() && dInfo.includes('**Exam Network:**')
+        ? dInfo.split('**Exam Network:**')[0] + marked(acc.info) : merge(methodology.infogathering, acc.info)[0];
+      upd.serviceenum = (methodology.serviceenum || '').trim() === dEnum.trim() ? dEnum.trimEnd() + '\n\n' + marked(acc.enum) : merge(methodology.serviceenum, acc.enum)[0];
+      await api('PATCH', `/api/v1/pentestprojects/${pid}/sections/methodology/`, { data: upd });
+      log(`Methodologies: ${acc.count} target(s) listed (${acc.kept} kept from earlier imports, ${acc.added} new)`, 'ok');
+    }
+    log('Done. Reload the project pages to see the changes.', 'ok');
+  } catch (e) { log(String(e.message || e), 'err'); }
+  await load(); await plan();
+}
+
+async function load() {
+  if (!pid) { $('#proj').innerHTML = '<span class="err">Open this page from a project menu.</span>'; return; }
+  project = await api('GET', `/api/v1/pentestprojects/${pid}/`);
+  design = await api('GET', `/api/v1/projecttypes/${project.project_type}/`);
+  findings = await all(`/api/v1/pentestprojects/${pid}/findings/`);
+  methodology = design.report_sections?.some((s) => s.id === 'methodology') ? (await api('GET', `/api/v1/pentestprojects/${pid}/sections/methodology/`)).data : null;
+  $('#proj').innerHTML = `Project <strong>${esc(project.name)}</strong> · design ${esc(design.name)} · ${findings.length} finding(s)` + (project.readonly ? ' · <span class="err">read-only</span>' : '');
+}
+
+const drop = $('#drop');
+drop.addEventListener('click', () => $('#file').click());
+drop.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#file').click(); } });
+$('#file').addEventListener('change', (e) => { handleSelection([...e.target.files], false); e.target.value = ''; });
+$('#dir').addEventListener('change', (e) => { handleSelection([...e.target.files], true); e.target.value = ''; });
+$('#pickdir').addEventListener('click', () => $('#dir').click());
+['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', async (e) => {
+  const hasDir = [...(e.dataTransfer.items || [])].some((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()?.isDirectory);
+  handleSelection(await collectDropped(e.dataTransfer), hasDir);
+});
+['#m-notes', '#m-findings', '#m-method'].forEach((s) => $(s).addEventListener('change', plan));
+$('#go').addEventListener('click', doImport);
+$('#reset').addEventListener('click', () => { targets.clear(); overviewFile = null; $('#files').innerHTML = ''; $('#log').innerHTML = ''; renderTargets(); plan(); });
+window.__arImport = { handleFiles, handleSelection, readEntry, collectDropped, targets, plan, overview, accumulated, merge };   // test hook
+load().catch((e) => { $('#proj').innerHTML = `<span class="err">${esc(e.message)}</span>`; });
+</script>
+</body>
+</html>

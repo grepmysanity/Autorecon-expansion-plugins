@@ -1,0 +1,11 @@
+# Local addition 2026-11-05: custom SysReptor plugins (AutoRecon / Nmap drag-and-drop import).
+# Compose loads this file automatically next to docker-compose.yml. Remove it to disable the mount.
+services:
+  app:
+    volumes:
+      - type: bind
+        source: ./custom_plugins
+        target: /app/custom_plugins
+        read_only: true
+    environment:
+      PLUGIN_DIRS: /app/plugins/,/app/custom_plugins/
