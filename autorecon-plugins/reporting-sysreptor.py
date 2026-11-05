@@ -28,10 +28,22 @@ def citation():
 	except Exception:
 		ver = ''
 	rows = '\n'.join(f'| `{s}` | {d} |' for s, d in PLUGINS)
+	try:
+		mod = [n for n, _, st, _ in custom_files() if st.startswith('modified')]
+	except Exception:
+		mod = []
+	if os.environ.get('AUTORECON_EXAM_CMD'):
+		how = 'started through the custom `autorecon-exam` launcher'
+	elif os.geteuid() == 0:
+		how = 'run as root (`sudo autorecon`) so that UDP was scanned on every host,'
+	else:
+		how = 'run directly (`autorecon`)'
 	return {'title': 'Tools and Custom Scripts', 'content':
 		'<span id="tools-and-custom-scripts"></span>\n\n'
-		f'Enumeration was automated with **AutoRecon{ver}** (Tib3rius, GPL-3.0, <https://github.com/Tib3rius/AutoRecon>) '
-		f'extended with the plugins published at <{REPO}>. The plugins run standard, publicly available enumeration tools '
+		f'Every host in scope was enumerated with **AutoRecon{ver}** (Tib3rius, GPL-3.0, <https://github.com/Tib3rius/AutoRecon>), '
+		+ how + f' and customised with: the plugins published at <{REPO}>'
+		+ (f', {len(mod)} modified stock plugin(s) (' + ', '.join(f'`{x}`' for x in mod) + ')' if mod else '')
+		+ ' and changed configuration (exam-safety plugin exclusions, thread counts). The plugins run standard, publicly available enumeration tools '
 		'and summarise their saved output; they perform no exploitation. Every command behind a reported result is listed '
 		'under **Enumeration Commands** in the Service Enumeration section of each target, so every step can be reproduced '
 		'without the plugins. The full source code of every custom or modified script, with SHA-256 hashes and the '
@@ -68,6 +80,22 @@ def custom_files():
 		out.append((os.path.basename(lp), lp, 'custom launcher script', ''))
 	return out
 
+def config_changes():
+	"""(name, path, diff) for AutoRecon config files that differ from the stock ones, plus added wordlists."""
+	import autorecon
+	pkg = os.path.dirname(autorecon.__file__)
+	cdir = config.get('config_dir') or os.path.dirname(config.get('config_file') or '')
+	out = []
+	for name in ('config.toml', 'global.toml'):
+		mine, stock = os.path.join(cdir, name), os.path.join(pkg, name)
+		if os.path.isfile(mine) and os.path.isfile(stock) and open(mine, 'rb').read() != open(stock, 'rb').read():
+			d = ''.join(difflib.unified_diff(open(stock, errors='replace').readlines(), open(mine, errors='replace').readlines(), 'stock/' + name, 'used/' + name))
+			out.append((name, mine, d))
+	wl_stock = set(os.listdir(os.path.join(pkg, 'wordlists'))) if os.path.isdir(os.path.join(pkg, 'wordlists')) else set()
+	wl_dir = os.path.join(config.get('data_dir') or '', 'wordlists')
+	added = sorted(set(os.listdir(wl_dir)) - wl_stock) if os.path.isdir(wl_dir) else []
+	return out, [(w, os.path.join(wl_dir, w)) for w in added]
+
 def _fence(text):
 	runs = [len(m) for m in re.findall(r'`+', text)]
 	return '`' * max(3, (max(runs) + 1) if runs else 3)
@@ -76,6 +104,16 @@ def source_appendix():
 	P = ['<span id="custom-tool-source-code"></span>', '', 'Full source code of every custom or modified script used for enumeration, reproduced exactly as it was run '
 		'(OffSec requires the full code, commands and output of custom scripts and tools). Modified stock AutoRecon '
 		'plugins also show their changes against the stock plugin as a diff.', '']
+	cfg, added = config_changes()
+	if cfg or added:
+		P += ['**AutoRecon configuration changes** (settings, not code; shown as diffs against the stock files):', '']
+		for name, path, d in cfg:
+			fd = _fence(d)
+			P += [f'`{name}`, SHA-256 `{hashlib.sha256(open(path, "rb").read()).hexdigest()}`', '', fd + 'diff', d.rstrip(), fd, '']
+		for w, path in added:
+			n = sum(1 for _ in open(path, 'rb'))
+			P += [f'Added wordlist `{w}` ({n} lines, SHA-256 `{hashlib.sha256(open(path, "rb").read()).hexdigest()}`): data only, used by suggested manual commands.', '']
+		P += ['**Custom and modified code:**', '']
 	for name, path, status, diff in custom_files():
 		data = open(path, 'rb').read()
 		P += [f'**{name}** — {status}, SHA-256 `{hashlib.sha256(data).hexdigest()}`', '']

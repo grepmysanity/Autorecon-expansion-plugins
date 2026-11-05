@@ -39,7 +39,7 @@ details{margin:6px 0}summary{cursor:pointer}.pill{display:inline-block;padding:1
 
 <h2>3 · What to import</h2>
 <label class="opt"><input type="checkbox" id="m-notes" checked> <strong>Notes</strong> — new page tree “AutoRecon import &lt;time&gt;” (always additive)</label>
-<label class="opt"><input type="checkbox" id="m-findings"> <strong>Target findings</strong> — create one per IP if missing; otherwise fill <em>Service Enumeration</em> only while it is the template, else add/refresh a marked block after your text</label>
+<label class="opt"><input type="checkbox" id="m-findings"> <strong>Target findings</strong> — match by IP, else fill an unused placeholder page of the same target type (IP still “TODO”), else create one; <em>Service Enumeration</em> is filled while it is the template, otherwise a marked block is added/refreshed after your text</label>
 <label class="opt"><input type="checkbox" id="m-method"> <strong>Methodologies</strong> — Information Gathering target list and Service Enumeration table (template example IPs replaced; edited text kept, block appended)</label>
 <label class="opt"><input type="checkbox" id="m-cite"> <strong>Tools citation + source code</strong> — Appendix entries “Tools and Custom Scripts” (citation) and “Custom Tool Source Code” (full code of every custom/modified script, as OffSec requires); added once, refreshed by later imports; from AutoRecon JSON only</label>
 
@@ -234,6 +234,24 @@ function citeAppendix(list) {
   }
   return [items, hows.join('; ')];
 }
+// Placeholder findings (IP still empty or "TODO …", e.g. the six OffSec pages created from the template) are
+// filled in order instead of creating new findings: same target type; a DC (Kerberos + LDAP open) prefers the
+// page titled "Domain Controller"/"DC", other hosts prefer the remaining pages. The page title is kept.
+const isPlaceholderIp = (v) => !(v || '').trim() || /todo/i.test(v);
+const tcpPorts = (t) => (t.tcp && t.tcp.length ? t.tcp : (t.ports || []).filter((p) => p.proto === 'tcp').map((p) => p.port));
+const isDc = (t) => { const p = new Set(tcpPorts(t)); return p.has(88) && p.has(389); };
+function placeholderMap() {
+  const claimed = new Set(), map = new Map();
+  const free = findings.filter((f) => isPlaceholderIp(f.data?.ip_address)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  for (const t of [...targets.values()].sort((a, b) => byIp(a.ip, b.ip))) {
+    if (findings.some((f) => (f.data?.ip_address || '').trim() === t.ip)) continue;
+    const pool = free.filter((f) => !claimed.has(f.id) && (f.data?.target_type || '') === t.type);
+    const dc = isDc(t), dcTitle = (f) => /domain controller|\bdc\b/i.test(f.data?.title || '');
+    const pick = pool.find((f) => dcTitle(f) === dc) || pool[0];
+    if (pick) { claimed.add(pick.id); map.set(t.ip, pick); }
+  }
+  return map;
+}
 // New finding: every field the design defines gets its default (template prompts), then our values.
 function newFinding(t) {
   const data = {};
@@ -261,9 +279,11 @@ async function plan() {
   if (!targets.size && !ov) { $('#plan').textContent = 'Drop files to see the plan.'; $('#go').disabled = true; return; }
   if ($('#m-notes').checked) out.push(`<div class="ok">Notes: new page “AutoRecon import …” with ${targets.size} target page(s)${ov ? ' + overview' : ''}</div>`);
   if ($('#m-findings').checked) {
+    const ph = placeholderMap();
     for (const t of targets.values()) {
       const m = findings.filter((f) => (f.data?.ip_address || '').trim() === t.ip);
-      if (!m.length) out.push(`<div>Finding <code>${esc(t.ip)}</code>: <span class="ok">create</span> “${esc(t.title)}” (${esc(t.type)})</div>`);
+      if (!m.length && ph.has(t.ip)) { const f = ph.get(t.ip); out.push(`<div>Finding <code>${esc(t.ip)}</code>: <span class="ok">fill placeholder</span> “${esc(f.data.title)}” (set IP; Service Enumeration → ${merge(f.data.serviceenum, t.serviceenum, fdef(design?.finding_fields, 'serviceenum'))[1]})</div>`); }
+      else if (!m.length) out.push(`<div>Finding <code>${esc(t.ip)}</code>: <span class="ok">create</span> “${esc(t.title)}” (${esc(t.type)}) <span class="mut">(no free placeholder page of this type)</span></div>`);
       else out.push(`<div>Finding <code>${esc(t.ip)}</code> “${esc(m[0].data.title)}”: Service Enumeration → <span class="warn">${merge(m[0].data.serviceenum, t.serviceenum, fdef(design?.finding_fields, 'serviceenum'))[1]}</span>${m.length > 1 ? ' (first of ' + m.length + ')' : ''}</div>`);
     }
   }
@@ -302,9 +322,15 @@ async function doImport() {
     }
     if ($('#m-findings').checked) {
       findings = await all(`/api/v1/pentestprojects/${pid}/findings/`);
+      const ph = placeholderMap();
       for (const t of targets.values()) {
         const m = findings.filter((f) => (f.data?.ip_address || '').trim() === t.ip);
-        if (!m.length) {
+        if (!m.length && ph.has(t.ip)) {
+          const f = ph.get(t.ip);
+          const [v, how] = merge(f.data.serviceenum, t.serviceenum, fdef(design.finding_fields, 'serviceenum'));
+          await api('PATCH', `/api/v1/pentestprojects/${pid}/findings/${f.id}/`, { data: { ip_address: t.ip, serviceenum: v } });
+          log(`Finding ${t.ip}: filled placeholder “${f.data.title}” (IP set; Service Enumeration — ${how})`, 'ok');
+        } else if (!m.length) {
           await api('POST', `/api/v1/pentestprojects/${pid}/findings/`, { data: newFinding(t) });
           log(`Finding ${t.ip}: created “${t.title}”`, 'ok');
         } else {
@@ -361,7 +387,7 @@ drop.addEventListener('drop', async (e) => {
 ['#m-notes', '#m-findings', '#m-method', '#m-cite'].forEach((s) => $(s).addEventListener('change', plan));
 $('#go').addEventListener('click', doImport);
 $('#reset').addEventListener('click', () => { targets.clear(); overviewFile = null; entries = null; $('#files').innerHTML = ''; $('#log').innerHTML = ''; renderTargets(); plan(); });
-window.__arImport = { handleFiles, handleSelection, readEntry, collectDropped, targets, plan, overview, accumulated, merge, citeAppendix, newFinding };   // test hook
+window.__arImport = { handleFiles, handleSelection, readEntry, collectDropped, targets, plan, overview, accumulated, merge, citeAppendix, newFinding, placeholderMap, setFindings: (f) => { findings = f; } };   // test hook
 load().catch((e) => { $('#proj').innerHTML = `<span class="err">${esc(e.message)}</span>`; });
 </script>
 </body>

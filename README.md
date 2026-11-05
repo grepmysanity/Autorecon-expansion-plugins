@@ -1,7 +1,5 @@
 # AutoRecon + SysReptor plugins (OSCP-style enumeration → report)
 
-Please note that changes and additions were made/checked with AI 
-
 Eight [AutoRecon](https://github.com/Tib3rius/AutoRecon) plugins that add enumeration and report-ready output,
 and a [SysReptor](https://github.com/Syslifters/sysreptor) plugin that imports that output (or raw Nmap XML)
 into a report by drag and drop. Built for the **OffSec OSCP+ Exam Report v2.1** SysReptor design; works on the
@@ -25,7 +23,7 @@ output instead of repeating it.
 | `snmp-community-walk.py` | `snmp-discovered-community-walk` | ServiceScan | Reuses the stock onesixtyone result (own run only if that plugin is excluded), then full / NET-SNMP-EXTEND / process-args / software / user walks for each community other than `public` |
 | `reporting-searchsploit.py` | `searchsploit-versions` | Report | Offline `searchsploit --nmap` on the target's Nmap XML (TCP, plus `scans/udp-top100.xml` if present) → `scans/_searchsploit_versions.txt` |
 | `reporting-triage.py` | `triage-summary` | Report | One-page `<target>/_triage.md` built from saved output only |
-| `reporting-sysreptor.py` | `sysreptor-overview` | Report | `<target>/_sysreptor.json/.md` (finding fields incl. **Enumeration Commands**, starting with how AutoRecon was launched) and `<output>/_sysreptor_overview.json/.md`; both carry two Appendix entries: the tools citation and **Custom Tool Source Code** (full source, SHA-256 and diff vs stock of every plugin that differs from stock AutoRecon, plus the launcher if `AUTORECON_EXAM_PATH` is set) |
+| `reporting-sysreptor.py` | `sysreptor-overview` | Report | `<target>/_sysreptor.json/.md` (finding fields incl. **Enumeration Commands**, starting with how AutoRecon was launched) and `<output>/_sysreptor_overview.json/.md`; both carry two Appendix entries: the tools citation and **Custom Tool Source Code** (full source, SHA-256 and diff vs stock of every plugin that differs from stock AutoRecon; diffs of `config.toml` / `global.toml` against stock and any added wordlists; the launcher if `AUTORECON_EXAM_PATH` is set). The citation states how AutoRecon was started (sudo, launcher or plain) |
 
 Install: copy the files into AutoRecon's plugin directory (default `~/.local/share/AutoRecon/plugins/`) and check
 with `autorecon --list`. Dependencies: `nxc` (NetExec), `ldapsearch`, `kerbrute`, Impacket (`GetNPUsers`), `onesixtyone`, Net-SNMP tools,
@@ -33,7 +31,17 @@ with `autorecon --list`. Dependencies: `nxc` (NetExec), `ldapsearch`, `kerbrute`
 
 Notes:
 - AutoRecon only scans UDP when run as root; the SNMP plugins need udp/161 to be detected (or
-  `--force-services udp/161/snmp`). Running AutoRecon with `sudo` uses root's plugin directory.
+  `--force-services udp/161/snmp`). Running AutoRecon with `sudo` uses root's plugin directory and root's
+  `config.toml`, so copy the plugins (and your config) to `/root/.local/share/AutoRecon/plugins/` and
+  `/root/.config/AutoRecon/` as well.
+- Under `sudo`, PATH is reset to sudo's `secure_path`, which hides tools installed for your user (pipx NetExec,
+  kerbrute in `~/.local/bin`). `nxc-smb.py` and `kerberos-userenum.py` append `/usr/local/bin` and the sudo user's
+  `~/.local/bin` to PATH for the AutoRecon process, so their checks pass when run as root.
+- Recommended for exams: exclude the stock plugins that execute commands or run exploit/unsafe probes in
+  `config.toml`, so the exclusion applies however AutoRecon is started:
+  `exclude-tags = 'smbmap,nmap-distccd,nmap-irc,nmap-vnc,nmap-rmi,smb-vulnerabilities'`.
+- The SysReptor output links each target's Service Enumeration to the appendix entries (anchors
+  `#tools-and-custom-scripts` and `#custom-tool-source-code`), so the full code appears once per report.
 - `reporting-sysreptor.py` lists only the commands behind the results it reports: Nmap command lines from the Nmap
   XML `args`, other commands from AutoRecon's `scans/_commands.log`. The FTP tree is produced in-process, so it is
   given as a standard-tool reproduction (`wget -r -l 6 --spider -nd ftp://…`).
@@ -45,7 +53,9 @@ Frontend-only plugin: adds **Plugins → AutoRecon / Nmap import** to each proje
 writes through SysReptor's REST API with the user's session:
 
 - **Notes** (default): new page tree “AutoRecon import <time> — <IPs>”; always additive.
-- **Target findings**: one finding per IP (Target Name, IP Address, Target Type, Service Enumeration). Existing text
+- **Target findings**: one finding per IP (Target Name, IP Address, Target Type, Service Enumeration), matched by IP; a
+  host with no match fills an unused placeholder page of the same target type (IP still empty or “TODO”, e.g. the six
+  OffSec pages; a domain controller prefers the page titled “Domain Controller”/“DC”), otherwise a new finding is created. Existing text
   is never replaced: a template field is filled, otherwise content goes into a block between invisible
   `<!-- autorecon:begin/end -->` markers that later imports refresh.
 - **Methodologies**: Information Gathering target list and Service Enumeration table, accumulated by IP across
