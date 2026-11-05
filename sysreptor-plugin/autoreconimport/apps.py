@@ -5,7 +5,8 @@ class AutoReconImportPluginConfig(PluginConfig):
     """
     Drag-and-drop import of AutoRecon results (the "sysreptor-overview" report: _sysreptor.json /
     _sysreptor_overview.json) and raw Nmap XML into a project: an additive notes tree, one target
-    finding per IP (Service Enumeration) and the Methodologies fields. Never overwrites text you wrote.
+    finding per IP (Service Enumeration; new findings get the design's template prompts), the Methodologies
+    fields and an Appendix "Tools and Custom Scripts" citation. Never overwrites text you wrote.
     Community-compatible local plugin (2026-11-05); parsing happens in your browser.
     """
 

@@ -41,6 +41,7 @@ details{margin:6px 0}summary{cursor:pointer}.pill{display:inline-block;padding:1
 <label class="opt"><input type="checkbox" id="m-notes" checked> <strong>Notes</strong> — new page tree “AutoRecon import &lt;time&gt;” (always additive)</label>
 <label class="opt"><input type="checkbox" id="m-findings"> <strong>Target findings</strong> — create one per IP if missing; otherwise fill <em>Service Enumeration</em> only while it is the template, else add/refresh a marked block after your text</label>
 <label class="opt"><input type="checkbox" id="m-method"> <strong>Methodologies</strong> — Information Gathering target list and Service Enumeration table (template example IPs replaced; edited text kept, block appended)</label>
+<label class="opt"><input type="checkbox" id="m-cite"> <strong>Tools citation</strong> — Appendix entry “Tools and Custom Scripts” citing AutoRecon and the plugin repository (added once, refreshed by later imports; from AutoRecon JSON only)</label>
 
 <h2>4 · Preview</h2>
 <div id="plan" class="mut">Drop files to see the plan.</div>
@@ -55,7 +56,7 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let project = null, design = null, findings = [], methodology = null;
 const targets = new Map();   // ip -> {ip,title,type,source,serviceenum,tcp,udp,udpScanned,nmap?}
-let overviewFile = null;
+let overviewFile = null, citation = null, appendix = null;
 
 function cookie(n) { return document.cookie.split('; ').find((c) => c.startsWith(n + '='))?.split('=')[1]; }
 async function api(method, path, body) {
@@ -123,6 +124,7 @@ function addNmap(text, fname) {
 }
 function addJson(text, fname) {
   let d; try { d = JSON.parse(text); } catch { return `${fname}: invalid JSON`; }
+  if (d.citation?.title && d.citation?.content) citation = d.citation;
   if (d.infogathering && d.serviceenum && Array.isArray(d.targets)) { overviewFile = d; return `${fname}: AutoRecon overview (${d.targets.length} target(s))`; }
   if (d.ip && d.serviceenum) {
     const old = targets.get(d.ip);
@@ -216,6 +218,24 @@ function merge(existing, add, dflt) {
   return [existing.trimEnd() + '\n\n' + marked(add), 'append block after your text'];
 }
 const fdef = (fields, id) => (fields || []).find((f) => f.id === id)?.default || '';
+// Appendix: one entry with the citation title; content refreshed inside the markers; the design's TODO placeholder entry is replaced.
+function citeAppendix(list) {
+  const items = (list || []).map((x) => ({ ...x })), sec = design.report_sections.find((s) => s.id === 'appendix');
+  const dItem = sec?.fields.find((f) => f.id === 'appendix_sections')?.items?.properties || [];
+  const dTitle = fdef(dItem, 'title'), dContent = fdef(dItem, 'content');
+  const i = items.findIndex((x) => (x.title || '').trim() === citation.title);
+  if (i >= 0) { const [v, how] = merge(items[i].content, citation.content); items[i].content = v; return [items, how]; }
+  const ph = items.findIndex((x) => (x.title || '').trim() === dTitle.trim() && (x.content || '').trim() === dContent.trim());
+  const entry = { title: citation.title, content: marked(citation.content) };
+  if (ph >= 0) { items[ph] = entry; return [items, 'replace template placeholder entry']; }
+  items.push(entry); return [items, 'add entry'];
+}
+// New finding: every field the design defines gets its default (template prompts), then our values.
+function newFinding(t) {
+  const data = {};
+  (design.finding_fields || []).forEach((f) => { if (f.default != null && f.default !== '') data[f.id] = f.default; });
+  return Object.assign(data, { title: t.title, ip_address: t.ip, target_type: t.type, serviceenum: marked(t.serviceenum) });
+}
 
 // ---------- UI ----------
 function renderTargets() {
@@ -255,8 +275,13 @@ async function plan() {
       out.push(`<details><summary>Methodologies text after import</summary><pre>${esc('Information Gathering\n\n' + acc.info + '\nService Enumeration\n\n' + acc.enum)}</pre></details>`);
     }
   }
+  if ($('#m-cite').checked) {
+    if (!appendix) out.push('<div class="err">Tools citation: this design has no “appendix” section</div>');
+    else if (!citation) out.push('<div class="mut">Tools citation: no AutoRecon JSON dropped (Nmap XML carries no citation)</div>');
+    else out.push(`<div>Appendix / ${esc(citation.title)} → <span class="warn">${citeAppendix(appendix.appendix_sections)[1]}</span></div>`);
+  }
   $('#plan').innerHTML = out.join('') || '<span class="mut">Nothing selected.</span>';
-  $('#go').disabled = project?.readonly || !(targets.size || ov) || !($('#m-notes').checked || $('#m-findings').checked || $('#m-method').checked);
+  $('#go').disabled = project?.readonly || !(targets.size || ov) || !($('#m-notes').checked || $('#m-findings').checked || $('#m-method').checked || ($('#m-cite').checked && citation && appendix));
 }
 function log(msg, cls = '') { const d = document.createElement('div'); d.className = cls; d.textContent = msg; $('#log').appendChild(d); }
 
@@ -276,7 +301,7 @@ async function doImport() {
       for (const t of targets.values()) {
         const m = findings.filter((f) => (f.data?.ip_address || '').trim() === t.ip);
         if (!m.length) {
-          await api('POST', `/api/v1/pentestprojects/${pid}/findings/`, { data: { title: t.title, ip_address: t.ip, target_type: t.type, serviceenum: marked(t.serviceenum) } });
+          await api('POST', `/api/v1/pentestprojects/${pid}/findings/`, { data: newFinding(t) });
           log(`Finding ${t.ip}: created “${t.title}”`, 'ok');
         } else {
           const [v, how] = merge(m[0].data.serviceenum, t.serviceenum, fdef(design.finding_fields, 'serviceenum'));
@@ -296,6 +321,12 @@ async function doImport() {
       await api('PATCH', `/api/v1/pentestprojects/${pid}/sections/methodology/`, { data: upd });
       log(`Methodologies: ${acc.count} target(s) listed (${acc.kept} kept from earlier imports, ${acc.added} new)`, 'ok');
     }
+    if ($('#m-cite').checked && citation && appendix) {
+      appendix = (await api('GET', `/api/v1/pentestprojects/${pid}/sections/appendix/`)).data;
+      const [list, how] = citeAppendix(appendix.appendix_sections);
+      await api('PATCH', `/api/v1/pentestprojects/${pid}/sections/appendix/`, { data: { appendix_sections: list } });
+      log(`Appendix: ${citation.title} — ${how}`, 'ok');
+    }
     log('Done. Reload the project pages to see the changes.', 'ok');
   } catch (e) { log(String(e.message || e), 'err'); }
   await load(); await plan();
@@ -307,6 +338,7 @@ async function load() {
   design = await api('GET', `/api/v1/projecttypes/${project.project_type}/`);
   findings = await all(`/api/v1/pentestprojects/${pid}/findings/`);
   methodology = design.report_sections?.some((s) => s.id === 'methodology') ? (await api('GET', `/api/v1/pentestprojects/${pid}/sections/methodology/`)).data : null;
+  appendix = design.report_sections?.some((s) => s.id === 'appendix' && s.fields.some((f) => f.id === 'appendix_sections')) ? (await api('GET', `/api/v1/pentestprojects/${pid}/sections/appendix/`)).data : null;
   $('#proj').innerHTML = `Project <strong>${esc(project.name)}</strong> · design ${esc(design.name)} · ${findings.length} finding(s)` + (project.readonly ? ' · <span class="err">read-only</span>' : '');
 }
 
@@ -322,10 +354,10 @@ drop.addEventListener('drop', async (e) => {
   const hasDir = [...(e.dataTransfer.items || [])].some((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()?.isDirectory);
   handleSelection(await collectDropped(e.dataTransfer), hasDir);
 });
-['#m-notes', '#m-findings', '#m-method'].forEach((s) => $(s).addEventListener('change', plan));
+['#m-notes', '#m-findings', '#m-method', '#m-cite'].forEach((s) => $(s).addEventListener('change', plan));
 $('#go').addEventListener('click', doImport);
-$('#reset').addEventListener('click', () => { targets.clear(); overviewFile = null; $('#files').innerHTML = ''; $('#log').innerHTML = ''; renderTargets(); plan(); });
-window.__arImport = { handleFiles, handleSelection, readEntry, collectDropped, targets, plan, overview, accumulated, merge };   // test hook
+$('#reset').addEventListener('click', () => { targets.clear(); overviewFile = null; citation = null; $('#files').innerHTML = ''; $('#log').innerHTML = ''; renderTargets(); plan(); });
+window.__arImport = { handleFiles, handleSelection, readEntry, collectDropped, targets, plan, overview, accumulated, merge, citeAppendix, newFinding };   // test hook
 load().catch((e) => { $('#proj').innerHTML = `<span class="err">${esc(e.message)}</span>`; });
 </script>
 </body>

@@ -69,7 +69,7 @@ class FtpAnonTree(ServiceScan):
 		self.tags = ['default', 'safe', 'ftp', 'local-addition']
 
 	def configure(self):
-		self.match_service_name(['^ftp', '^ftp\\-data'])
+		self.match_service_name('^ftp(?!-data)')   # control channel only; ftp-data (20/tcp) never accepts a login
 
 	def manual(self, service, plugin_was_run):
 		service.add_manual_commands('Download an anonymous FTP tree only when a listed file is needed:', [

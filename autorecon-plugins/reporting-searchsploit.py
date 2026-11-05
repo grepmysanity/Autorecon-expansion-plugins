@@ -16,14 +16,15 @@ class SearchsploitVersions(Report):
 	def __init__(self):
 		super().__init__()
 		self.name = 'Searchsploit Versions'
-		self.tags = ['default', 'safe', 'report']
+		self.tags = ['default', 'safe', 'report', 'local-addition']
 
 	async def run(self, targets):
 		exe = shutil.which('searchsploit')
 		if exe is None:
 			return
 		for target in targets:
-			xmls = sorted(set(glob.glob(os.path.join(target.scandir, 'xml', '*.xml'))))
+			# TCP XML from AutoRecon plus the launcher's separate UDP scan (scans/udp-top100.xml), if present.
+			xmls = sorted(set(glob.glob(os.path.join(target.scandir, 'xml', '*.xml')) + glob.glob(os.path.join(target.scandir, 'udp-top100.xml'))))
 			# Only Nmap runs that recorded service versions are useful here.
 			xmls = [x for x in xmls if os.path.getsize(x) > 0 and 'version=' in open(x, errors='replace').read()]
 			if not xmls:

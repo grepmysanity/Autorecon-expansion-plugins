@@ -10,6 +10,33 @@ import xml.etree.ElementTree as ET
 # Paste the .md, or send the .json with:  sysreptor-push push --project "NAME" <output dir>
 # Contains only what the scans observed; the access/escalation narrative stays yours.
 
+REPO = 'https://github.com/grepmysanity/Autorecon-expansion-plugins'
+PLUGINS = [
+	('netexec-smb', 'NetExec null-session and guest RID cycling, guest share access'),
+	('ftp-anonymous-tree', 'recursive anonymous FTP listing (Python ftplib, read-only)'),
+	('ldap-anonymous', 'paged anonymous LDAP dump of accounts, computers and groups (ldapsearch)'),
+	('kerberos-user-enumeration', 'kerbrute user enumeration and AS-REP check (Impacket GetNPUsers, no password)'),
+	('snmp-discovered-community-walk', 'Net-SNMP walks with non-default communities found by onesixtyone'),
+	('searchsploit-versions', 'offline searchsploit lookup of detected versions'),
+	('triage-summary / sysreptor-overview', 'summaries of saved output; no network traffic'),
+]
+
+def citation():
+	try:
+		import importlib.metadata as md
+		ver = ' ' + md.version('autorecon')
+	except Exception:
+		ver = ''
+	rows = '\n'.join(f'| `{s}` | {d} |' for s, d in PLUGINS)
+	return {'title': 'Tools and Custom Scripts', 'content':
+		f'Enumeration was automated with **AutoRecon{ver}** (Tib3rius, GPL-3.0, <https://github.com/Tib3rius/AutoRecon>) '
+		f'extended with the plugins published at <{REPO}>. The plugins run standard, publicly available enumeration tools '
+		'and summarise their saved output; they perform no exploitation. Every command behind a reported result is listed '
+		'under **Enumeration Commands** in the Service Enumeration section of each target, so every step can be reproduced '
+		'without the plugins.\n\n| Plugin | Purpose |\n| ------- | ------- |\n' + rows + '\n\n'
+		'Exploits and scripts used for initial access or privilege escalation are cited in the step where they were used '
+		'(URL for unmodified public code; full modified code, the original URL and the changes for modified code).\n'}
+
 def _read(p, cap=300000):
 	try:
 		with open(p, errors='replace') as fh:
@@ -234,6 +261,7 @@ class SysreptorReport(Report):
 				'tcp': sorted(p for (pr, p) in svc if pr == 'tcp'), 'udp': sorted(p for (pr, p) in svc if pr == 'udp'),
 				'udp_scanned': bool(_find(sd, 'udp-top100.xml')) or any(pr == 'udp' for (pr, _) in svc),
 				'serviceenum': md,
+				'citation': citation(),
 			}
 			with open(os.path.join(base, '_sysreptor.json'), 'w') as fh:
 				json.dump(data, fh, indent=1)
@@ -261,8 +289,8 @@ class SysreptorReport(Report):
 		enum = ('Each target was scanned with AutoRecon (all TCP ports, service and version detection, per-service enumeration)'
 			+ udp_txt + '.\n\n| IP Address | Ports Open |\n| ------- | ------- |\n'
 			+ '\n'.join(f"| {i['ip']} | **TCP:** {', '.join(map(str, i['tcp'])) or '—'} **UDP:** {', '.join(map(str, i['udp'])) or ('—' if i.get('udp_scanned', True) else 'not scanned')} |" for i in items) + '\n')
-		data = {'schema': 1, 'generated_utc': stamp, 'targets': ips, 'infogathering': info, 'serviceenum': enum}
+		data = {'schema': 1, 'generated_utc': stamp, 'targets': ips, 'infogathering': info, 'serviceenum': enum, 'citation': citation()}
 		with open(os.path.join(outdir, '_sysreptor_overview.json'), 'w') as fh:
 			json.dump(data, fh, indent=1)
 		with open(os.path.join(outdir, '_sysreptor_overview.md'), 'w') as fh:
-			fh.write(f'<!-- SysReptor Methodologies fields, generated {stamp}. -->\n\n--- Information Gathering (target list) ---\n\n{info}\n--- Service Enumeration (overview) ---\n\n{enum}')
+			fh.write(f'<!-- SysReptor Methodologies fields, generated {stamp}. -->\n\n--- Information Gathering (target list) ---\n\n{info}\n--- Service Enumeration (overview) ---\n\n{enum}\n--- Appendix: {data["citation"]["title"]} ---\n\n{data["citation"]["content"]}')
