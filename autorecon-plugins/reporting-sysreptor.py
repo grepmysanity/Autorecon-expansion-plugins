@@ -29,6 +29,7 @@ def citation():
 		ver = ''
 	rows = '\n'.join(f'| `{s}` | {d} |' for s, d in PLUGINS)
 	return {'title': 'Tools and Custom Scripts', 'content':
+		'<span id="tools-and-custom-scripts"></span>\n\n'
 		f'Enumeration was automated with **AutoRecon{ver}** (Tib3rius, GPL-3.0, <https://github.com/Tib3rius/AutoRecon>) '
 		f'extended with the plugins published at <{REPO}>. The plugins run standard, publicly available enumeration tools '
 		'and summarise their saved output; they perform no exploitation. Every command behind a reported result is listed '
@@ -72,7 +73,7 @@ def _fence(text):
 	return '`' * max(3, (max(runs) + 1) if runs else 3)
 
 def source_appendix():
-	P = ['Full source code of every custom or modified script used for enumeration, reproduced exactly as it was run '
+	P = ['<span id="custom-tool-source-code"></span>', '', 'Full source code of every custom or modified script used for enumeration, reproduced exactly as it was run '
 		'(OffSec requires the full code, commands and output of custom scripts and tools). Modified stock AutoRecon '
 		'plugins also show their changes against the stock plugin as a diff.', '']
 	for name, path, status, diff in custom_files():
@@ -308,7 +309,9 @@ def target_block(address, sd):
 		L += ['**Enumeration Results**', ''] + [f'* {o}' for o in obs] + ['']
 	cmds = commands(address, sd, cats)
 	if cmds:
-		L += ['**Enumeration Commands**', '', '```bash'] + cmds + ['```', '']
+		L += ['**Enumeration Commands**', '', '```bash'] + cmds + ['```', '',
+			'Custom scripts used here are cited in [Tools and Custom Scripts](#tools-and-custom-scripts); their full source code is in '
+			'the appendix [Custom Tool Source Code](#custom-tool-source-code) (once per report).', '']
 	return '\n'.join(L).rstrip() + '\n', svc, host
 
 class SysreptorReport(Report):
