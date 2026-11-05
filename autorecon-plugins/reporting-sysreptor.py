@@ -1,6 +1,6 @@
 from autorecon.plugins import Report
 from autorecon.config import config
-import datetime, glob, json, os, re
+import datetime, difflib, glob, hashlib, json, os, re, shlex, sys
 import xml.etree.ElementTree as ET
 
 # Local addition 2026-11-05. Report-ready enumeration text for the SysReptor
@@ -15,7 +15,7 @@ PLUGINS = [
 	('netexec-smb', 'NetExec null-session and guest RID cycling, guest share access'),
 	('ftp-anonymous-tree', 'recursive anonymous FTP listing (Python ftplib, read-only)'),
 	('ldap-anonymous', 'paged anonymous LDAP dump of accounts, computers and groups (ldapsearch)'),
-	('kerberos-user-enumeration', 'kerbrute user enumeration and AS-REP check (Impacket GetNPUsers, no password)'),
+	('kerberos-user-enumeration', 'kerbrute user enumeration (AS-REP request with Impacket GetNPUsers only when explicitly enabled)'),
 	('snmp-discovered-community-walk', 'Net-SNMP walks with non-default communities found by onesixtyone'),
 	('searchsploit-versions', 'offline searchsploit lookup of detected versions'),
 	('triage-summary / sysreptor-overview', 'summaries of saved output; no network traffic'),
@@ -33,9 +33,76 @@ def citation():
 		f'extended with the plugins published at <{REPO}>. The plugins run standard, publicly available enumeration tools '
 		'and summarise their saved output; they perform no exploitation. Every command behind a reported result is listed '
 		'under **Enumeration Commands** in the Service Enumeration section of each target, so every step can be reproduced '
-		'without the plugins.\n\n| Plugin | Purpose |\n| ------- | ------- |\n' + rows + '\n\n'
+		'without the plugins. The full source code of every custom or modified script, with SHA-256 hashes and the '
+		'changes made to stock AutoRecon plugins, is reproduced in the appendix **Custom Tool Source Code**.\n\n| Plugin | Purpose |\n| ------- | ------- |\n' + rows + '\n\n'
 		'Exploits and scripts used for initial access or privilege escalation are cited in the step where they were used '
 		'(URL for unmodified public code; full modified code, the original URL and the changes for modified code).\n'}
+
+def _stock_dirs():
+	# Stock plugins of every AutoRecon install (the running one first): pipx for the user, Kali's apt
+	# package under sudo. A plugin identical to any of them counts as stock.
+	import autorecon
+	homes = [os.path.expanduser('~')] + ([os.path.expanduser('~' + os.environ['SUDO_USER'])] if os.environ.get('SUDO_USER') else [])
+	cands = [os.path.join(os.path.dirname(autorecon.__file__), 'default-plugins')]
+	for h in homes:
+		cands += sorted(glob.glob(os.path.join(h, '.local/share/pipx/venvs/autorecon/lib/python3*/site-packages/autorecon/default-plugins')))
+	cands += sorted(glob.glob('/usr/lib/python3*/dist-packages/autorecon/default-plugins'))
+	return [d for d in dict.fromkeys(cands) if os.path.isdir(d)]
+
+def custom_files():
+	"""(name, path, status, diff) for every plugin that is not byte-identical to stock AutoRecon, plus the launcher."""
+	out, stocks = [], _stock_dirs()
+	for f in sorted(glob.glob(os.path.join(config.get('plugins_dir') or '', '*.py'))):
+		b = os.path.basename(f)
+		mine = open(f, 'rb').read()
+		refs = [os.path.join(d, b) for d in stocks if os.path.exists(os.path.join(d, b))]
+		if not refs:
+			out.append((b, f, 'custom plugin', ''))
+		elif not any(open(r, 'rb').read() == mine for r in refs):
+			ref = min(refs, key=lambda r: sum(1 for l in difflib.unified_diff(open(r, errors='replace').readlines(), mine.decode('utf-8', 'replace').splitlines(True)) if l[:1] in '+-'))
+			d = ''.join(difflib.unified_diff(open(ref, errors='replace').readlines(), mine.decode('utf-8', 'replace').splitlines(True), 'stock/' + b, 'used/' + b))
+			out.append((b, f, 'modified stock AutoRecon plugin', d))
+	lp = os.environ.get('AUTORECON_EXAM_PATH')
+	if lp and os.path.isfile(lp):
+		out.append((os.path.basename(lp), lp, 'custom launcher script', ''))
+	return out
+
+def _fence(text):
+	runs = [len(m) for m in re.findall(r'`+', text)]
+	return '`' * max(3, (max(runs) + 1) if runs else 3)
+
+def source_appendix():
+	P = ['Full source code of every custom or modified script used for enumeration, reproduced exactly as it was run '
+		'(OffSec requires the full code, commands and output of custom scripts and tools). Modified stock AutoRecon '
+		'plugins also show their changes against the stock plugin as a diff.', '']
+	for name, path, status, diff in custom_files():
+		data = open(path, 'rb').read()
+		P += [f'**{name}** — {status}, SHA-256 `{hashlib.sha256(data).hexdigest()}`', '']
+		if diff:
+			fd = _fence(diff)
+			P += ['Changes against stock AutoRecon:', '', fd + 'diff', diff.rstrip(), fd, '']
+		text = data.decode('utf-8', 'replace').rstrip()
+		fc = _fence(text)
+		P += [fc + ('python' if name.endswith('.py') else 'bash'), text, fc, '']
+	return {'title': 'Custom Tool Source Code', 'content': '\n'.join(P)}
+
+def invocation():
+	cmd = os.environ.get('AUTORECON_EXAM_CMD')
+	if cmd:
+		return cmd
+	argv = [os.path.basename(sys.argv[0])] + sys.argv[1:]
+	return ('sudo ' if os.geteuid() == 0 else '') + ' '.join(shlex.quote(a) for a in argv)
+
+def invocations(sd):
+	# Every AutoRecon start for this target, oldest first (reruns append; duplicates kept once).
+	f = os.path.join(os.path.dirname(sd.rstrip('/')), '_autorecon_invocations.txt')
+	seen = [l.strip() for l in _read(f).splitlines() if l.strip()]
+	cur = invocation()
+	if cur not in seen:
+		seen.append(cur)
+		with open(f, 'a') as fh:
+			fh.write(cur + '\n')
+	return seen
 
 def _read(p, cap=300000):
 	try:
@@ -200,6 +267,10 @@ def commands(address, sd, cats):
 	def add(c):
 		if c and c not in seen:
 			seen.add(c); out.append(c)
+	add('# enumeration started with (custom launcher / AutoRecon; source code in the appendix):')
+	for c in invocations(sd):
+		add(c)
+	add('# commands run by AutoRecon behind the results above:')
 	scans = [x for x in _find(sd, os.path.join('xml', '_*.xml'))] + _find(sd, 'udp-top100.xml')
 	for x in scans:
 		try:
@@ -262,6 +333,7 @@ class SysreptorReport(Report):
 				'udp_scanned': bool(_find(sd, 'udp-top100.xml')) or any(pr == 'udp' for (pr, _) in svc),
 				'serviceenum': md,
 				'citation': citation(),
+				'appendix': [citation(), source_appendix()],
 			}
 			with open(os.path.join(base, '_sysreptor.json'), 'w') as fh:
 				json.dump(data, fh, indent=1)
@@ -289,8 +361,8 @@ class SysreptorReport(Report):
 		enum = ('Each target was scanned with AutoRecon (all TCP ports, service and version detection, per-service enumeration)'
 			+ udp_txt + '.\n\n| IP Address | Ports Open |\n| ------- | ------- |\n'
 			+ '\n'.join(f"| {i['ip']} | **TCP:** {', '.join(map(str, i['tcp'])) or '—'} **UDP:** {', '.join(map(str, i['udp'])) or ('—' if i.get('udp_scanned', True) else 'not scanned')} |" for i in items) + '\n')
-		data = {'schema': 1, 'generated_utc': stamp, 'targets': ips, 'infogathering': info, 'serviceenum': enum, 'citation': citation()}
+		data = {'schema': 1, 'generated_utc': stamp, 'targets': ips, 'infogathering': info, 'serviceenum': enum, 'citation': citation(), 'appendix': [citation(), source_appendix()]}
 		with open(os.path.join(outdir, '_sysreptor_overview.json'), 'w') as fh:
 			json.dump(data, fh, indent=1)
 		with open(os.path.join(outdir, '_sysreptor_overview.md'), 'w') as fh:
-			fh.write(f'<!-- SysReptor Methodologies fields, generated {stamp}. -->\n\n--- Information Gathering (target list) ---\n\n{info}\n--- Service Enumeration (overview) ---\n\n{enum}\n--- Appendix: {data["citation"]["title"]} ---\n\n{data["citation"]["content"]}')
+			fh.write(f'<!-- SysReptor Methodologies fields, generated {stamp}. -->\n\n--- Information Gathering (target list) ---\n\n{info}\n--- Service Enumeration (overview) ---\n\n{enum}' + ''.join(f'\n--- Appendix: {e["title"]} ---\n\n{e["content"]}\n' for e in data['appendix']))

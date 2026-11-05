@@ -19,11 +19,11 @@ output instead of repeating it.
 | `nxc-smb.py` | `netexec-smb` | ServiceScan | RID cycling with a null session; guest `--shares` and guest RID cycling; writes `smb_rid_users.txt` |
 | `ftp-anon-tree.py` | `ftp-anonymous-tree` | ServiceScan | Recursive anonymous FTP listing (depth 6, 3000 entries, 120 s); downloads nothing |
 | `ldap-anon.py` | `ldap-anonymous` | ServiceScan | Naming context, then (if anonymous bind reads the tree) a full paged dump of accounts incl. description/info/password fields, computers and groups |
-| `kerberos-userenum.py` | `kerberos-user-enumeration` | ServiceScan | `kerbrute userenum --safe`; domain from `--global.domain`, saved enum4linux-ng / LDAP output, LDAP RootDSE or the NetExec banner; writes `kerberos_valid_users.txt`, then AS-REP check (`impacket-GetNPUsers -no-pass`) on those users plus any already found by RID cycling / anonymous LDAP → `kerberos_asrep_hashes.txt` |
+| `kerberos-userenum.py` | `kerberos-user-enumeration` | ServiceScan | `kerbrute userenum --safe`; domain from `--global.domain`, saved enum4linux-ng / LDAP output, LDAP RootDSE or the NetExec banner; writes `kerberos_valid_users.txt` and `kerberos_asrep_candidates.txt` (plus names from RID cycling / anonymous LDAP). The AS-REP request (`impacket-GetNPUsers -no-pass` → `kerberos_asrep_hashes.txt`) runs only with `--kerberos-user-enumeration.asrep`: it obtains crackable hashes, an attack step |
 | `snmp-community-walk.py` | `snmp-discovered-community-walk` | ServiceScan | Reuses the stock onesixtyone result (own run only if that plugin is excluded), then full / NET-SNMP-EXTEND / process-args / software / user walks for each community other than `public` |
 | `reporting-searchsploit.py` | `searchsploit-versions` | Report | Offline `searchsploit --nmap` on the target's Nmap XML (TCP, plus `scans/udp-top100.xml` if present) → `scans/_searchsploit_versions.txt` |
 | `reporting-triage.py` | `triage-summary` | Report | One-page `<target>/_triage.md` built from saved output only |
-| `reporting-sysreptor.py` | `sysreptor-overview` | Report | `<target>/_sysreptor.json/.md` (finding fields incl. **Enumeration Commands**) and `<output>/_sysreptor_overview.json/.md` |
+| `reporting-sysreptor.py` | `sysreptor-overview` | Report | `<target>/_sysreptor.json/.md` (finding fields incl. **Enumeration Commands**, starting with how AutoRecon was launched) and `<output>/_sysreptor_overview.json/.md`; both carry two Appendix entries: the tools citation and **Custom Tool Source Code** (full source, SHA-256 and diff vs stock of every plugin that differs from stock AutoRecon, plus the launcher if `AUTORECON_EXAM_PATH` is set) |
 
 Install: copy the files into AutoRecon's plugin directory (default `~/.local/share/AutoRecon/plugins/`) and check
 with `autorecon --list`. Dependencies: `nxc` (NetExec), `ldapsearch`, `kerbrute`, Impacket (`GetNPUsers`), `onesixtyone`, Net-SNMP tools,
@@ -48,9 +48,10 @@ writes through SysReptor's REST API with the user's session:
   `<!-- autorecon:begin/end -->` markers that later imports refresh.
 - **Methodologies**: Information Gathering target list and Service Enumeration table, accumulated by IP across
   imports (one scan per host, later hosts after a pivot).
-- **Tools citation**: Appendix entry “Tools and Custom Scripts” citing AutoRecon and this repository (text comes from
-  the `citation` key that `reporting-sysreptor.py` writes into every JSON); replaces the design's TODO placeholder entry,
-  keeps other entries, refreshes its own marked block on later imports.
+- **Tools citation + source code**: Appendix entries “Tools and Custom Scripts” and “Custom Tool Source Code” (from the
+  `appendix` key that `reporting-sysreptor.py` writes into every JSON). OffSec requires the full code, commands and
+  output of custom scripts and tools in the report. Replaces the design's TODO placeholder entry, keeps other entries,
+  refreshes its own marked blocks on later imports.
 
 New target findings are created with every default (template prompt) of the design, plus the imported fields.
 

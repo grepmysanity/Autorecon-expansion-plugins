@@ -3,13 +3,20 @@ from autorecon.config import config
 from shutil import which
 import os, re
 
+# Under sudo, PATH is reset to sudo's secure_path (no /usr/local/bin, no ~/.local/bin), so tools
+# installed for the user (pipx NetExec, kerbrute) are not found. Append those directories; the
+# change applies to every command AutoRecon starts from this process. Existing PATH order is kept.
+_extra = ['/usr/local/bin'] + ([os.path.expanduser('~' + os.environ['SUDO_USER']) + '/.local/bin'] if os.environ.get('SUDO_USER') else [])
+os.environ['PATH'] = os.pathsep.join(dict.fromkeys(os.environ.get('PATH', '').split(os.pathsep) + [d for d in _extra if os.path.isdir(d)]))
+
 # Local addition 2026-11-04. Kerberos username enumeration with kerbrute (AS-REQ without
 # pre-authentication data): tells which usernames exist without trying any password, so it does
 # not add to badPwdCount; it does create 4768 events on the DC. --safe aborts if an account is
 # reported locked. Domain: --global.domain, else LDAP RootDSE, else the NetExec SMB banner.
 # Overlap with stock: nmap-kerberos runs krb5-enum-users only when --global.domain is given and
 # with a short built-in list. This plugin adds: domain auto-detection, a large wordlist, --safe,
-# a reusable valid-user list, and an AS-REP check (impacket-GetNPUsers -no-pass, one request
+# a reusable valid-user list, and - only with --kerberos-user-enumeration.asrep (off by default since
+# 2026-11-05: it obtains crackable hashes, an attack step) - an AS-REP check (impacket-GetNPUsers -no-pass, one request
 # per known user: kerbrute hits plus names already saved by RID cycling / anonymous LDAP; no password)
 # - stock AutoRecon has no AS-REP check. Domain is read from saved enum4linux-ng / LDAP output first.
 # Output: *_kerbrute_userenum.txt, kerberos_valid_users.txt (one name per line),
@@ -70,6 +77,7 @@ class KerberosUserEnum(ServiceScan):
 	def configure(self):
 		self.add_option('wordlist', default='/usr/share/seclists/Usernames/Names/names.txt', help='Usernames to test. Default: %(default)s')
 		self.add_option('threads', default='10', help='kerbrute threads. Default: %(default)s')
+		self.add_true_option('asrep', help='Also request AS-REP hashes (impacket-GetNPUsers -no-pass) for the users found. Off by default: it retrieves crackable credential material, which is an attack step to run and document by hand. Default: %(default)s')
 		self.match_service_name(['^kerberos', '^kerberos-sec'])
 		self.run_once(True)
 
@@ -79,7 +87,7 @@ class KerberosUserEnum(ServiceScan):
 			return False
 
 	def manual(self, service, plugin_was_run):
-		service.add_manual_commands('Kerberos follow-ups (the AS-REP check already ran on the kerbrute users; rerun with names from LDAP/RID cycling):', [
+		service.add_manual_commands('Kerberos follow-ups: AS-REP roasting check by hand (no password; users from kerbrute, RID cycling and anonymous LDAP are in kerberos_asrep_candidates.txt):', [
 			'impacket-GetNPUsers DOMAIN/ -dc-ip {address} -usersfile users.txt -no-pass -format hashcat -outputfile asrep.txt',
 			'kerbrute userenum -d DOMAIN --dc {address} --safe /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt   # larger list',
 		])
@@ -107,9 +115,10 @@ class KerberosUserEnum(ServiceScan):
 		hashes = []
 		npu = which('impacket-GetNPUsers') or which('GetNPUsers.py')
 		cands = list(dict.fromkeys(users + known_names(target.scandir)))   # + names from RID cycling / anonymous LDAP, if already saved
-		if cands and npu:
+		if cands:
 			with open(os.path.join(scandir, 'kerberos_asrep_candidates.txt'), 'w') as fh:
 				fh.write('\n'.join(cands) + '\n')
+		if cands and npu and self.get_option('asrep'):
 			_, out, _ = await service.execute(os.path.basename(npu) + ' ' + domain + '/ -dc-ip {address} -no-pass -format hashcat -usersfile "' + os.path.join(scandir, 'kerberos_asrep_candidates.txt') + '" 2>&1', outfile='{protocol}_{port}_kerberos_asrep_check.txt')
 			hashes = asrep_hashes('\n'.join(await out.readlines()))
 		if hashes:

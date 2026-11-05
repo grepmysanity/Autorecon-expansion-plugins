@@ -180,8 +180,10 @@ class TriageReport(Report):
 				nopre = asrep_users(sd)
 				if nopre:
 					L.append('- **No pre-authentication: ' + ', '.join(f'`{u}`' for u in nopre) + '** — hashes in `kerberos_asrep_hashes.txt` (hashcat -m 18200)')
-				elif users:
+				elif users and _find(sd, '*_kerberos_asrep_check.txt'):
 					L.append('- AS-REP check found no account without pre-authentication. Recheck with names from LDAP/RID cycling if those found more.')
+				elif users:
+					L.append('- AS-REP roasting not run automatically (attack step): run it by hand from `_manual_commands.txt` with `kerberos_asrep_candidates.txt`, and document it.')
 			ld = ldap_facts(sd)
 			if ld['dn'] or ld['dc'] or ld['objects']:
 				L += ['', '## LDAP / AD', '', f'- Naming context `{ld["dn"] or "?"}`, DC `{ld["dc"] or "?"}` — add the DC FQDN to /etc/hosts; pass `--global.domain` on reruns']

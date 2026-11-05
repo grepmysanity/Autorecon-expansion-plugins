@@ -3,6 +3,12 @@ from autorecon.config import config
 from shutil import which
 import os, re
 
+# Under sudo, PATH is reset to sudo's secure_path (no /usr/local/bin, no ~/.local/bin), so tools
+# installed for the user (pipx NetExec, kerbrute) are not found. Append those directories; the
+# change applies to every command AutoRecon starts from this process. Existing PATH order is kept.
+_extra = ['/usr/local/bin'] + ([os.path.expanduser('~' + os.environ['SUDO_USER']) + '/.local/bin'] if os.environ.get('SUDO_USER') else [])
+os.environ['PATH'] = os.pathsep.join(dict.fromkeys(os.environ.get('PATH', '').split(os.pathsep) + [d for d in _extra if os.path.isdir(d)]))
+
 # Local addition 2026-11-04, reworked 2026-11-05 to add only what stock AutoRecon does not:
 #  - stock nmap-smb (smb-os-discovery, smb2-security-mode), enum4linux-ng -A (null-session
 #    users/groups/shares/password policy) and smbclient -L already give host facts, null
