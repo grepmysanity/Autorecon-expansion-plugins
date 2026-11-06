@@ -82,14 +82,27 @@ def ldap_facts(sd):
 	t = ''.join(_read(f) for f in _find(sd, '*ldap_naming_context.txt'))
 	d = re.search(r'^defaultNamingContext:\s*(\S+)', t, re.M | re.I) or re.search(r'^namingContexts:\s*(\S+)', t, re.M | re.I)
 	h = re.search(r'^dnsHostName:\s*(\S+)', t, re.M | re.I)
-	users = ''.join(_read(f) for f in _find(sd, '*ldap_anonymous_users.txt'))
-	notes = [(a, v.strip()) for a, v in re.findall(r'^(description|info|comment|userPassword|unixUserPassword)::?\s*(.+)$', users, re.M | re.I)]
+	def ldif(name):
+		# Join LDIF continuation lines (older runs wrapped at 76 chars) and decode base64 (attr::) values.
+		import base64
+		text = re.sub(r'\n (?=\S)', '', ''.join(_read(f) + '\n' for f in _find(sd, name)))
+		out = []
+		for a, b64, v in re.findall(r'^([A-Za-z][\w-]*):(:?)\s*(.*)$', text, re.M):
+			if b64:
+				try:
+					v = base64.b64decode(v).decode('utf-8', 'replace')
+				except Exception:
+					pass
+			out.append((a, v.strip()))
+		return out
+	users = ldif('*ldap_anonymous_users.txt')
+	keep = ('description', 'info', 'comment', 'userpassword', 'unixuserpassword')
 	return {
 		'dn': d.group(1) if d else '', 'dc': h.group(1) if h else '',
-		'objects': len(re.findall(r'^dn: ', users, re.M)),
-		'accounts': lines_of(sd, 'ldap_anonymous_usernames.txt'),
-		'fields': notes,
-		'computers': re.findall(r'^dNSHostName:\s*(\S+)', ''.join(_read(f) for f in _find(sd, '*ldap_anonymous_computers.txt')), re.M),
+		'objects': len({v for a, v in users if a.lower() == 'dn'}),
+		'accounts': list(dict.fromkeys(lines_of(sd, 'ldap_anonymous_usernames.txt'))),
+		'fields': list(dict.fromkeys((a, v) for a, v in users if a.lower() in keep and v)),
+		'computers': list(dict.fromkeys(v for a, v in ldif('*ldap_anonymous_computers.txt') if a.lower() == 'dnshostname')),
 	}
 
 def asrep_users(sd):
@@ -188,7 +201,7 @@ class TriageReport(Report):
 			if ld['dn'] or ld['dc'] or ld['objects']:
 				L += ['', '## LDAP / AD', '', f'- Naming context `{ld["dn"] or "?"}`, DC `{ld["dc"] or "?"}` — add the DC FQDN to /etc/hosts; pass `--global.domain` on reruns']
 				if ld['objects']:
-					L.append(f'- **Anonymous bind reads the directory**: {ld["objects"]} account objects, {len(ld["accounts"])} usernames in `ldap_anonymous_usernames.txt`' + (f', {len(ld["computers"])} computers' if ld['computers'] else ''))
+					L.append(f'- **Anonymous bind reads the directory**: {ld["objects"]} account objects, {len(ld["accounts"])} usernames in `ldap_anonymous_usernames.txt`' + (f', {len(ld["computers"])} computer' + ('s' if len(ld['computers']) != 1 else '') if ld['computers'] else ''))
 					for a, v in ld['fields'][:15]:
 						L.append(f'  - {a}: `{v[:120]}`')
 					if len(ld['fields']) > 15:

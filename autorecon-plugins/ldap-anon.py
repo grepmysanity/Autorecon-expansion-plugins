@@ -41,6 +41,7 @@ class LdapAnon(ServiceScan):
 
 	def configure(self):
 		self.match_service_name('^ldap')
+		self.run_once(True)   # a DC exposes 389/636/3268/3269: one dump is enough (avoids four identical dumps)
 
 	def check(self):
 		if which('ldapsearch') is None:
@@ -55,7 +56,7 @@ class LdapAnon(ServiceScan):
 
 	async def run(self, service):
 		secure = bool(service.secure) or service.port in (636, 3269)
-		base = ('LDAPTLS_REQCERT=never ' if secure else '') + 'ldapsearch -x -o nettimeout=15 -H ' + ('ldaps' if secure else 'ldap') + '://{address}:{port} '
+		base = ('LDAPTLS_REQCERT=never ' if secure else '') + 'ldapsearch -x -o nettimeout=15 -o ldif-wrap=no -H ' + ('ldaps' if secure else 'ldap') + '://{address}:{port} '
 		_, stdout, _ = await service.execute(base + '-s base -b "" "(objectClass=*)" defaultNamingContext rootDomainNamingContext namingContexts dnsHostName 2>&1', outfile='{protocol}_{port}_ldap_naming_context.txt')
 		dn = naming_context(await stdout.readlines())
 		if not dn or not re.fullmatch(r'[A-Za-z0-9=,._ -]+', dn):

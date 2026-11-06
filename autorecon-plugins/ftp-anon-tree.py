@@ -1,6 +1,6 @@
 from autorecon.plugins import ServiceScan
 from autorecon.config import config
-import asyncio, ftplib, os, ssl
+import asyncio, ftplib, os, re, ssl
 
 # Local addition 2026-11-04. If anonymous FTP login works, record the WHOLE directory tree
 # (names, sizes, dates) — Nmap's ftp-anon only lists the top folder. Listing only: nothing is
@@ -43,6 +43,11 @@ def _walk(host, port, secure):
 				return
 			rows = []
 			for r in raw:
+				dos = re.match(r'^(\d{2}-\d{2}-\d{2,4})\s+(\d{1,2}:\d{2}[AP]M)\s+(<DIR>|\d+)\s+(.+)$', r)   # IIS / MS-DOS style
+				if dos:
+					if dos.group(4) not in ('.', '..'):
+						rows.append((dos.group(4), 'dir' if dos.group(3) == '<DIR>' else 'file', '' if dos.group(3) == '<DIR>' else dos.group(3), dos.group(1) + ' ' + dos.group(2)))
+					continue
 				parts = r.split(None, 8)
 				if len(parts) == 9 and parts[8] not in ('.', '..'):
 					rows.append((parts[8], 'dir' if r.startswith('d') else 'file', parts[4], ' '.join(parts[5:8])))

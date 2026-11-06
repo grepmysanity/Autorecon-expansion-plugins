@@ -88,7 +88,7 @@ class KerberosUserEnum(ServiceScan):
 
 	def manual(self, service, plugin_was_run):
 		service.add_manual_commands('Kerberos follow-ups: AS-REP roasting check by hand (no password; users from kerbrute, RID cycling and anonymous LDAP are in kerberos_asrep_candidates.txt):', [
-			'impacket-GetNPUsers DOMAIN/ -dc-ip {address} -usersfile users.txt -no-pass -format hashcat -outputfile asrep.txt',
+			'impacket-GetNPUsers DOMAIN/ -dc-ip {address} -usersfile {scandir}/kerberos_asrep_candidates.txt -no-pass -format hashcat -outputfile asrep.txt',
 			'kerbrute userenum -d DOMAIN --dc {address} --safe /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt   # larger list',
 		])
 

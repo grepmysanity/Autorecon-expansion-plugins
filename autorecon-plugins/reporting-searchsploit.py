@@ -1,5 +1,4 @@
 from autorecon.plugins import Report
-from autorecon.config import config
 import glob, os, shutil, subprocess
 
 # Added 2026-11-04 (local exam prep). Offline only: reads the Nmap XML that AutoRecon
