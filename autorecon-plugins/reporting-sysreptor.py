@@ -163,6 +163,21 @@ def _read(p, cap=300000):
 def _find(sd, pattern):
 	return sorted(glob.glob(os.path.join(sd, '**', pattern), recursive=True))
 
+def udp_scanned(sd):
+	"""True when any UDP scan ran: AutoRecon's own (as root: xml/_top_100_udp_nmap.xml or _custom_ports_udp_nmap.xml)
+	or a separate scan saved as udp-top100.xml."""
+	return bool(_find(sd, 'udp-top100.xml') or _find(sd, os.path.join('xml', '_top_100_udp_nmap.xml')) or _find(sd, os.path.join('xml', '_custom_ports_udp_nmap.xml')))
+
+def ftp_files(text, limit=8):
+	"""File names from an ftp_anon_tree listing (directories skipped)."""
+	names = []
+	for l in text.splitlines():
+		s = l.strip()
+		if not s or s.startswith('#') or s.startswith('[D]') or s.startswith('[!]'):
+			continue
+		names.append(s.split('  ')[0])
+	return names[:limit], len(names)
+
 # --- facts shared by the triage and SysReptor reports (same code in both plugins) ---
 def smb_facts(sd):
 	"""Host facts from stock outputs: enum4linux-ng (YAML-style lines) first, Nmap smb NSE second."""
@@ -281,7 +296,8 @@ def notes(sd):
 			n = len([l for l in t.splitlines() if l.strip() and not l.lstrip().startswith('#')])
 			port = re.search(r'_(\d+)_ftp_anon_tree', f)
 			cats.setdefault('ftp', []).append(port.group(1) if port else '21')
-			out.append(f'FTP{" (" + port.group(1) + ")" if port else ""}: anonymous login accepted; {n} entries listed.')
+			names, nfiles = ftp_files(t)
+			out.append(f'FTP{" (" + port.group(1) + ")" if port else ""}: anonymous login accepted; {n} entries listed' + (': ' + ', '.join(f'`{x}`' for x in names) + (' …' if nfiles > len(names) else '') if names else '') + '.')
 	ld = ldap_facts(sd)
 	if ld['dn'] or ld['dc']:
 		cats['ldap'] = True
@@ -358,7 +374,7 @@ def commands(address, sd, cats):
 def target_block(address, sd):
 	svc = services(sd)
 	tcp = ', '.join(str(p) for (pr, p) in sorted(svc) if pr == 'tcp') or '—'
-	udp = ', '.join(str(p) for (pr, p) in sorted(svc) if pr == 'udp') or ('not scanned' if not _find(sd, 'udp-top100.xml') else '—')
+	udp = ', '.join(str(p) for (pr, p) in sorted(svc) if pr == 'udp') or ('not scanned' if not udp_scanned(sd) else '—')
 	L = ['**Port Scan Results**', '', '| IP Address | Ports Open |', '| ------- | ------- |', f'| {address} | **TCP:** {tcp} **UDP:** {udp} |', '']
 	if svc:
 		L += ['**Service Details**', '', '| Port | Service | Product / Version |', '| ------- | ------- | ------- |']
@@ -395,7 +411,7 @@ class SysreptorReport(Report):
 				'title': host or target.address,
 				'target_type_guess': 'activedirectoryset' if ({88, 389} <= ports or 3268 in ports) else 'independent',
 				'tcp': sorted(p for (pr, p) in svc if pr == 'tcp'), 'udp': sorted(p for (pr, p) in svc if pr == 'udp'),
-				'udp_scanned': bool(_find(sd, 'udp-top100.xml')) or any(pr == 'udp' for (pr, _) in svc),
+				'udp_scanned': udp_scanned(sd) or any(pr == 'udp' for (pr, _) in svc),
 				'serviceenum': md,
 				'citation': citation(),
 				'appendix': [citation(), source_appendix()],
@@ -422,7 +438,7 @@ class SysreptorReport(Report):
 		info = '**Exam Network:**\n' + '\n'.join(f'* {ip}' for ip in ips) + '\n'
 		udp_all = all(i.get('udp_scanned', True) for i in items)
 		udp_any = any(i.get('udp_scanned', True) for i in items)
-		udp_txt = ' and a separate top-100 UDP scan' if udp_all else (' and, where noted, a separate top-100 UDP scan' if udp_any else '; UDP was not scanned')
+		udp_txt = ' and a top-100 UDP scan' if udp_all else (' and, where noted, a top-100 UDP scan' if udp_any else '; UDP was not scanned')
 		enum = ('Each target was scanned with AutoRecon (all TCP ports, service and version detection, per-service enumeration)'
 			+ udp_txt + '.\n\n| IP Address | Ports Open |\n| ------- | ------- |\n'
 			+ '\n'.join(f"| {i['ip']} | **TCP:** {', '.join(map(str, i['tcp'])) or '—'} **UDP:** {', '.join(map(str, i['udp'])) or ('—' if i.get('udp_scanned', True) else 'not scanned')} |" for i in items) + '\n')

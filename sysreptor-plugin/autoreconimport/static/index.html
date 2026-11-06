@@ -183,7 +183,7 @@ function renderOverview(ips, rows) {
   const list = [...new Set([...ips, ...rows.keys()])].sort(byIp);
   const R = [...rows.keys()].sort(byIp).map((k) => rows.get(k));
   const ns = R.filter((r) => /not scanned/.test(r)).length;
-  const udp = !R.length || ns === 0 ? ' and a separate top-100 UDP scan' : ns < R.length ? ' and, where noted, a separate top-100 UDP scan' : '; UDP was not scanned';
+  const udp = !R.length || ns === 0 ? ' and a top-100 UDP scan' : ns < R.length ? ' and, where noted, a top-100 UDP scan' : '; UDP was not scanned';
   return {
     count: list.length,
     info: '**Exam Network:**\n' + list.map((i) => `* ${i}`).join('\n') + '\n',

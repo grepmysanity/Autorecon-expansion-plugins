@@ -15,7 +15,7 @@ def _services(scandir):
 			continue
 		for port in root.iter('port'):
 			st = port.find('state')
-			if st is None or 'open' not in st.get('state', ''):
+			if st is None or st.get('state') != 'open':   # open|filtered (no reply) is not an open service
 				continue
 			svc = port.find('service')
 			key = (port.get('protocol'), int(port.get('portid')))
@@ -34,6 +34,21 @@ def _read(path, limit=200000):
 
 def _find(scandir, pattern):
 	return sorted(glob.glob(os.path.join(scandir, '**', pattern), recursive=True))
+
+def udp_scanned(sd):
+	"""True when any UDP scan ran: AutoRecon's own (as root: xml/_top_100_udp_nmap.xml or _custom_ports_udp_nmap.xml)
+	or a separate scan saved as udp-top100.xml."""
+	return bool(_find(sd, 'udp-top100.xml') or _find(sd, os.path.join('xml', '_top_100_udp_nmap.xml')) or _find(sd, os.path.join('xml', '_custom_ports_udp_nmap.xml')))
+
+def ftp_files(text, limit=8):
+	"""File names from an ftp_anon_tree listing (directories skipped)."""
+	names = []
+	for l in text.splitlines():
+		s = l.strip()
+		if not s or s.startswith('#') or s.startswith('[D]') or s.startswith('[!]'):
+			continue
+		names.append(s.split('  ')[0])
+	return names[:limit], len(names)
 
 # --- facts shared by the triage and SysReptor reports (same code in both plugins) ---
 def smb_facts(sd):
@@ -129,8 +144,10 @@ class TriageReport(Report):
 				L.append(f"| {port}/{proto} | {name} | {' '.join(v for v in (s['product'], s['version'], s['extrainfo']) if v)} |")
 			if not svc:
 				L.append('| — | no open ports parsed | check scans/_full_tcp_nmap.txt |')
-			if not any(p == 'udp' for p, _ in svc):
+			if not udp_scanned(sd):
 				L += ['', '> **UDP not covered.** AutoRecon scans UDP only as root. Run: `sudo nmap -sU -sV --top-ports 100 -oA scans/udp-top100 ' + target.address + '`']
+			elif not any(p == 'udp' for p, _ in svc):
+				L += ['', '> UDP top 100 was scanned: no port answered (any `open|filtered` entries in the Nmap file had no response and are not listed).']
 
 			hits = []
 			pat = _read(os.path.join(sd, '_patterns.log'))
@@ -168,7 +185,10 @@ class TriageReport(Report):
 				t = _read(f)
 				if 'ACCEPTED' in t:
 					n = len([l for l in t.splitlines() if l.strip() and not l.lstrip().startswith('#')])
+					names, nfiles = ftp_files(t, 15)
 					L += ['', '## FTP', '', f'- **Anonymous login accepted** — {n} entries listed in `{os.path.relpath(f, sd)}`']
+					if names:
+						L.append(f'- Files ({nfiles}): ' + ', '.join(f'`{x}`' for x in names) + (' …' if nfiles > len(names) else '') + ' — fetch with `wget -m ftp://anonymous:anonymous@' + target.address + '/` and read them')
 
 			f = smb_facts(sd)
 			smb = []
